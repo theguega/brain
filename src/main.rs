@@ -126,7 +126,7 @@ fn run(raw: &[String]) -> Result<()> {
         "skip" => skip(&lib()?, &Args::parse(rest, &[], &["--all"])?)?,
         "sync" => sync(&lib()?)?,
         "index" => out!("indexed {} papers", Index::rebuild(&lib()?)?),
-        "skill" => skill(&Args::parse(rest, &[], &[])?)?,
+        "skill" | "--skill" => skill(&Args::parse(rest, &[], &[])?)?,
         other => {
             return Err(usage(&format!(
                 "unknown command {other:?}; see `paperdb help`"
