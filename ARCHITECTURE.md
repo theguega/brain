@@ -31,6 +31,7 @@ ClickUp, GitHub, calendar ─live─▶ planner (prompts on timers) ─▶ │  
                                   drover v2 (runs, events) ──journal──▶ ┘                ◀─SSE── drover
 ```
 
+- What you mark is compiled into wiki pages (Karpathy's LLM Wiki): a reader run drafts the pages, `brain wiki propose` lints them onto a vault branch, and they land only when you merge them.
 - Agents read the brain through the CLI and one skill. The dashboard reads it through its BFF over HTTP, with drover events arriving over SSE.
 - drover runs agents either in herdr panes (terminal pair-coding) or headless (the dashboard and other agents). Both modes emit the same events.
 - ocu stays as the ClickUp client. Mail management is postponed: native Gmail filters cover it for now.
@@ -42,9 +43,9 @@ Each contract is a JSON Schema in `brain/contracts/` with a version field. Chang
 | ID | Contract | Producer → consumer | Shape | Swap test |
 |---|---|---|---|---|
 | C1 | Doc (file) | brain add, feed like → index, Obsidian, rg | `docs/<id>/meta.json` + `text.md` (artifacts: `index.html`). `kind` is one of paper, book, course, blog, news, talk, note, artifact, meeting. Each kind has a JSON Schema with its required metadata; a paper's includes `links{code, project, hf, openreview, video}` | A new kind is a schema file, with no code change |
-| C2 | Page (file) | agents, you → index | `pages/<slug>.md`, frontmatter `{kind, title, status, superseded_by}` + `[[wikilinks]]` | Editable in any markdown editor |
+| C2 | Page (file) | you, reader runs via `brain wiki propose` and `merge` → index | `pages/<slug>.md`, frontmatter `{kind, title, summary, status, sources[], updated, superseded_by?}` + `[[wikilinks]]`. `kind` is one of person, project, decision, concept, synthesis. In concept and synthesis pages every claim cites `[@<doc-id>#span]` | Editable in any markdown editor |
 | C3 | Log entry (file) | drover done, planner, shutdown, chat → index, planner | `log/YYYY-MM-DD.md`, one `## <ISO time with offset> · <IANA tz> · <place> · source · title` block per entry. Chat transcripts are in `chats/<id>.jsonl` | Any runtime writes the same block |
-| C4 | brain CLI (agent) | brain → any agent | `find · get · code · add · log · label · link · lint · reindex · eval`. A list prints as a table with the id first and a count; a single value prints as `key: value`; `--json` gives compact JSONL; errors print `error:` then `next:`; exit codes are 0, 1 or 2 | A reimplementation passes the same golden tests |
+| C4 | brain CLI (agent) | brain → any agent | `find · get · code · add · log · label · link · pages · wiki · lint · reindex · eval`. A list prints as a table with the id first and a count; a single value prints as `key: value`; `--json` gives compact JSONL; errors print `error:` then `next:`; exit codes are 0, 1 or 2 | A reimplementation passes the same golden tests |
 | C5 | Profile (agent) | nightly job → SessionStart hook | `profile.md`, at most 400 tokens: your focus, active projects, today's commitments, items that need you | Works with any harness that has a session-start hook |
 | C6 | Candidate pool (stream) | feed → dashboard, push | `{id, kind, first_seen, sources[], title, url, abstract, score, bucket, shown_at?, verdict?}`. Each source has its own cursor, gaps are backfilled, unshown items carry over, and items expire after 21 days | A week of downtime loses no paper |
 | C7 | Label (stream) | dashboard, CLI → feed ranker | `labels.jsonl {id, verdict: like\|skip\|later, ts, surface}` | The ranker can be retrained from this file alone |
@@ -62,7 +63,8 @@ Each contract is a JSON Schema in `brain/contracts/` with a version field. Chang
 
 - **Untrusted text** (papers, web pages, news, issues) is stored with `taint: external` and printed inside a fence.
 - **Free-tier models** only ever receive `kind ∈ {paper, rss, news}`.
-- **The reader profile** (chat, planner) has only `brain` and Read. It cannot run a shell or `ssh`.
+- **The reader profile** (chat, planner, wiki compile) has only brain read commands and Read. It cannot run a shell or `ssh`.
+- **Wiki compile** is a reader run: its reply is text that brain lints and commits to a branch. Nothing reaches the vault's `main` without your merge, and lint rejects uncited claims.
 - **The actor profile** runs only with a prompt you started or approved, and every tool call outside the allowlist waits for your answer.
 - **Claude** approvals use the `PermissionRequest` http hook. **Cursor** uses a `beforeShellExecution` / `beforeMCPExecution` hook that calls drover.
 - **The dashboard** is reachable on the tailnet only, behind oauth2-proxy with Google OIDC and an email allowlist. The BFF is bound to localhost and never invokes a shell.
@@ -81,6 +83,7 @@ Each contract is a JSON Schema in `brain/contracts/` with a version field. Chang
 | D7 | The feed starts with a Semantic Scholar baseline, then moves to a PU-logistic ranker (Elkan & Noto calibration). Laya and Jev are not used for now. |
 | D8 | brain is the only memory. The drover journal moves into `brain log`, and supermemory goes. |
 | D9 | The dashboard is designed in Claude Design and built at step 5. |
+| D10 | The wiki follows Karpathy's LLM Wiki (compile, query, lint), plus cited claims and branch-per-edit review. Omnigraph was considered and rejected: git already gives branches, merge and history over plain files, and the only graph need (C16) fits in SQLite. |
 | Q11 | Tailnet plus Google OAuth. |
 | Q12 | Code knowledge is docs, commits, repo cards and live rg. Summaries only if the eval shows code questions failing. |
 | Q13 | A native adapter per harness. |
@@ -97,6 +100,6 @@ Each contract is a JSON Schema in `brain/contracts/` with a version field. Chang
 1. brain: review paperdb against the Rust skill, rename it, migrate the data, build the index and CLI, write the 50-question eval.
 2. feed: the persistent pool, sources, the S2 baseline, then the ranker. Retire weekly-papers.
 3. drover v2: the Claude and Cursor adapters (after the hook spike), events, approvals, the goal graph.
-4. planner: prompts, timers, shutdown capture.
+4. planner: prompts, timers, shutdown capture, then compile and wiki lint.
 5. dashboard: the Rust BFF, then the React PWA from the Claude Design session.
 6. Cleanup: remove Discord, prune skills, drop supermemory, backfill the last month.

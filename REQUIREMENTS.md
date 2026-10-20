@@ -43,6 +43,9 @@ The knowledge layer: vault files, a rebuildable index, one CLI and one skill. Bu
 | B14 | MUST | Meetings: `kind: meeting`, only the ones you mark. Metadata: `{started_at, tz, place, attendees → people pages, project, source}`. Added with `brain add notes.md --kind meeting`, or pasted in the dashboard. | A meeting links to its attendees' pages and its project. |
 | B15 | MUST | Time follows you: every timestamp is stored as UTC plus the IANA timezone and place at capture time (C15). The current context is set by the dashboard when opened (browser timezone, optional coarse location) and by the SessionStart hook on your laptop (system timezone). The last writer wins. | A log entry written in Tokyo reads in Tokyo local time, even when viewed later from SF. |
 | B16 | MUST | Portable host: the whole system lives in `~/brain`, `~/.local/state`, `~/.config` and the dotfiles. No absolute paths, no hostnames in data, and machine names only in config. One documented `migrate` procedure covers restic restore, `dot`, `brain reindex` and enabling the timers. | Move to a second machine in under 30 minutes, and `brain eval` gives the same scores. |
+| B17 | MUST | Wiki pages (C2) of kind concept and synthesis cite a doc for every claim (`[@id#span]`), list their citations in `sources[]`, and carry a one-line `summary`. `brain pages [--kind]` prints the catalog. | `brain pages --kind concept` lists every concept page with its summary. |
+| B18 | MUST | `brain lint` adds wiki checks. Errors: dead links or citations, uncited paragraphs, citations missing from `sources[]`, a missing summary. Warnings: orphans, contradictions open more than 14 days, active pages untouched for 90 days. | A paragraph without a citation in a concept page exits 1 and names the line. |
+| B19 | MUST | `brain wiki queue` lists marked docs not yet compiled; `brain wiki ls` and `diff <branch>` show the open proposals. `brain wiki merge <branch>` merges an agent branch into the vault, reindexes the changed pages and logs a `source: compile` block; a conflict drops the branch and re-queues the doc. `brain wiki drop <branch>` discards it. | Merging two branches that edit the same page: the first lands, the second's doc is back in the queue. |
 | B12 | SHOULD | Embeddings come from a local OpenAI-compatible `/v1/embeddings` server with a configurable model. If it's down, `find` runs BM25-only and prints `degraded: no vectors`. | Stop the embedder and `find` still answers, flagged as degraded. |
 
 ## F · feed
@@ -80,7 +83,7 @@ The agent runtime: pane and headless runs through native adapters, approvals, ev
 | D4 | MUST | Approvals: a `permission_request` becomes a `needs` event, answered via CLI or HTTP. drover enforces the owner inside `send`. | Sending to a pane you don't own is refused. |
 | D5 | MUST | State lives in `~/.local/state/drover` (SQLite: runs, events). Nothing in the checkout. | — |
 | D6 | MUST | drover-wt worktrees, local and over ssh, keep their current semantics. | `#pr`, prefix, and safe rm still work. |
-| D7 | MUST | Profiles: `reader` (tools limited to `brain` and Read) and `actor`. Dashboard chat is a reader run: a warm process, killed after 15 minutes idle. | A reader run cannot execute `ssh`. |
+| D7 | MUST | Profiles: `reader` (tools limited to brain read commands — `find`, `get`, `pages`, `code` — and Read) and `actor`. Dashboard chat is a reader run: a warm process, killed after 15 minutes idle. | A reader run cannot execute `ssh` or `brain wiki merge`. |
 | D8 | MUST | `done` writes the journal entry with `brain log`. There is no `journal.db`. | — |
 | D9 | MUST | CLI rebuilt on clap with C4 output rules. A mate is any harness session following the mates skill, registered with drover as `role: mate`. There is no resident mates process. | The skill body is ≤600 tokens and contains no command list. |
 | D11 | MUST | Every run carries `role` (task, mate, crew or chat) and `parent`. A mate's goal graph (C16: nodes, checks, rounds, crew runs) is stored with its run and streamed in C9. | `drover show <mate>` lists its nodes and its crew runs. |
@@ -103,6 +106,8 @@ The day around you: a proposal in the morning, capture in the evening, a review 
 | P5 | MUST | 18:30 shutdown, deterministic: commits and PRs across registered repos, task state changes and drover runs go into `log/`. Uncommitted focus items roll over with a count. | Opalin work appears in the log without any manual journaling. |
 | P6 | MUST | Sunday review: estimated vs actual time, deep-work hours, rollovers, feed like-rate, ranker AUC. | — |
 | P7 | MUST | Planner prompts are versioned files in the brain repo, run through drover's adapter (harness-agnostic). | Switching harness changes no prompt file. |
+| P8 | MUST | Compile: each queued doc gets one `reader` run (`planner/compile.md`, at most 5 a night) that replies with the full text of the pages it updates or creates, keeping disagreements as `[!contradiction]` callouts citing both sides. `brain wiki propose` lints the reply and commits it to branch `wiki/<doc-id>`; a lint failure is retried once with the errors. Chat's "file as page" runs the same prompt with a thread as input. | Liking π0.5 yields a branch that edits the existing "π0" and "flow matching" concept pages instead of creating duplicates. |
+| P9 | SHOULD | Weekly wiki lint: a `reader` run (`planner/wiki-lint.md`) proposes fixes for stale claims, missing concepts and missing cross-links on one `wiki/lint-<date>` branch. | — |
 
 ## M · mail
 
@@ -144,3 +149,4 @@ Only the requirements here. The look comes in round 4, in Claude Design.
 | U3 | MUST | An installable PWA that works on the phone. | — |
 | U4 | MUST | Chat shows citations to brain ids, visible tool calls and approval gates, and can promote a thread to a drover run with a prompt you edit. | — |
 | U5 | MUST | Calm: a badge only for things blocked on you. | — |
+| U7 | MUST | Wiki review: proposed page edits appear in Inbox as a rendered diff per page, with the source doc beside it. Keys: `a` merge, `x` drop, `g` open the branch for a manual edit. Library shows pages with their citations as chips. | A compile branch is merged from the phone in two taps. |

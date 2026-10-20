@@ -4,7 +4,7 @@ brain is the knowledge layer: a vault of plain files, an index rebuilt from thos
 
 The repo is paperdb renamed (D2). It holds the Rust crate, `feed/` (Python, the paper and news feed), `planner/` (prompt files), and `contracts/` (JSON Schemas for C1–C16).
 
-Status: design, round 3. Requirements B1–B16, F1–F10, P1–P7.
+Status: design, round 3. Requirements B1–B19, F1–F10, P1–P9.
 
 ## Layers
 
@@ -23,7 +23,7 @@ Status: design, round 3. Requirements B1–B16, F1–F10, P1–P7.
 ~/brain/                      local git, no remote (Q15)
   docs/<id>/meta.json         C1: kind, source, title, required metadata per kind
   docs/<id>/text.md           full text (artifact: index.html; text extracted at index time)
-  pages/<slug>.md             C2: people, projects, decisions; frontmatter + [[wikilinks]]
+  pages/<slug>.md             C2: the wiki: people, projects, decisions, concepts, syntheses
   log/YYYY-MM-DD.md           C3: journal, plan, shutdown, chat summaries
   chats/<id>.jsonl            raw chat transcripts (normalized C9 events)
   labels.jsonl                C7: feed verdicts
@@ -34,7 +34,7 @@ Status: design, round 3. Requirements B1–B16, F1–F10, P1–P7.
 ```
 
 Rules:
-- One writer per file type. `brain` writes docs, pages, the log and the profile. `feed` writes `labels.jsonl` only through `brain label`.
+- One writer per file type. `brain` writes docs, the log and the profile. `feed` writes `labels.jsonl` only through `brain label`. Pages are written by you, or by `brain wiki propose` on a branch that reaches `main` only through `brain wiki merge` (see Wiki).
 - A write goes to a temp file and is then renamed (`write_atomic`, kept from paperdb), and is committed to local git in the background, debounced to one commit per minute.
 - Nothing in the vault holds an absolute path or a hostname (B16).
 
@@ -108,7 +108,12 @@ Code is never copied. `brain code <q> [--repo]` runs `rg --json` across the regi
 | `brain log <text> [--source]` | appends a C3 block | `at`, `file` |
 | `brain label <id> like\|skip\|later` | appends C7 (a like also runs `add`) | `id`, `verdict` |
 | `brain link <a> <b> <rel>` | adds a link to a page's frontmatter | `noop:` if it already exists |
-| `brain lint` | validates against the schemas | errors, exit 1 |
+| `brain pages [--kind]` | the wiki catalog: one line per page | `pages[n/total]{slug,kind,updated,summary}` |
+| `brain wiki queue` | marked docs no compile has covered yet | `queue[n/total]{id,kind,added}` |
+| `brain wiki ls` · `diff <branch>` | open `wiki/*` branches; one branch's page diff | `branches[n/total]{branch,doc,pages,created}` · the diff |
+| `brain wiki propose <doc-id\|lint>` | reads a run's page blocks on stdin, lints them, commits them to `wiki/<doc-id>` | `branch`, `pages`, or lint errors, exit 1 |
+| `brain wiki merge <branch>` · `drop <branch>` | lands or discards a proposed page edit | `merged`, `pages`, `conflict?` |
+| `brain lint [--vault <dir>]` | schemas, plus the wiki checks | errors and warnings, exit 1 on errors |
 | `brain reindex [--full]` | incremental or full rebuild | counts |
 | `brain eval` | recall@8 and tokens per answer | two numbers, plus a diff against the last run |
 | `brain migrate` | moves the system to a new host (B16) | a checklist |
@@ -136,6 +141,40 @@ Output rules:
 - one line: "ask brain before guessing: `brain find`"
 
 It's capped at 400 tokens, counted with a tokenizer approximation, and the cap is tested.
+
+## Wiki (C2, B17–B19)
+
+Karpathy's LLM Wiki pattern (gist 442a6bf5, 2026): instead of re-deriving answers from raw docs at every query, an agent compiles what you mark into pages that hold the current synthesis, so knowledge accumulates. Docs are the immutable sources; pages are the wiki; the compile and lint prompts are its schema. brain stays model-free: it stores, checks and merges pages, and the writing happens in drover runs.
+
+**Pages.** Frontmatter `{kind, title, summary, status, sources[], updated, superseded_by?}`. `summary` is one line of at most 120 chars, and is what `brain pages` prints. Kinds:
+
+| Kind | Holds | Citations |
+|---|---|---|
+| person · project · decision | as before | optional |
+| concept | a method, idea or result across papers: "diffusion policy", "JEPA", "action chunking" | required |
+| synthesis | an answer worth keeping: a comparison, a chat answer, a reading of several docs | required |
+
+**Citations.** A claim cites its source inline as `[@<doc-id>]` or `[@<doc-id>#<span>]`, the same span syntax as `brain get`. In a concept or synthesis page, every paragraph and list item outside `## Open questions` carries at least one citation, and every cited id is in `sources[]`. This is the guard against drift: a summary of a summary is caught, because each claim must point back to a doc you can open.
+
+**Contradictions.** When a new doc disagrees with a page, compile keeps both claims and adds a `> [!contradiction]` callout citing both. You resolve it by editing the page; open callouts are counted in the Sunday review.
+
+**Compile.** A like or `brain add` puts the doc in `brain wiki queue` (marked docs minus those listed in a `source: compile` log block). The tick starts one ordinary `reader` run per queued doc, at most 5 a night, with `planner/compile.md`. Each run:
+1. reads the doc and `brain pages`, and `brain find`s related pages
+2. replies with the full new text of each page it creates or changes, one `=== page: <slug>` block per page; it writes no file
+
+The tick pipes that reply into `brain wiki propose <doc-id>`, which lints the pages and commits them to branch `wiki/<doc-id>` through a temporary worktree under `~/.cache/brain/`, leaving the vault's checkout untouched. On lint errors the tick retries the run once with the errors appended to the prompt, then gives up and logs it. So the agent never writes to the vault, brain stays its only writer, and drover needs no wiki-specific profile.
+
+Marking a doc is your approval to compile it. Merging is your approval to publish it. `brain wiki merge` does a git merge into the vault's `main`, reindexes the changed pages, and writes one C3 block `source: compile` listing the doc ids and pages. A conflict aborts the merge, drops the branch and re-queues the doc, so the next run starts from the merged state.
+
+**Filing answers.** From a chat thread, "file as page" starts a compile run with the thread as input and a `synthesis` page as the target. The same review applies.
+
+**Lint.** `brain lint` adds deterministic wiki checks to the schema checks:
+- errors: dead `[[wikilinks]]` or citations, uncited paragraphs in concept or synthesis pages, cited ids missing from `sources[]`, a missing `summary`
+- warnings: orphan pages (no inbound link), open contradictions older than 14 days, `status: active` pages with no update in 90 days
+
+The semantic pass is `planner/wiki-lint.md`, a weekly `reader` run that looks for stale claims, missing concepts and missing cross-links; its reply goes through `brain wiki propose lint` onto a `wiki/lint-<date>` branch.
+
+**Why no `index.md`.** The gist keeps a generated catalog file for the agent to read first. Here that is `brain pages`: a derived file would duplicate the frontmatter in the vault (principle 2), and the CLI scales past the few hundred pages where a flat catalog stops fitting a context window.
 
 ## Eval (B8)
 
@@ -187,7 +226,8 @@ Each item records its `bucket`. Items not shown carry over. Items expire after 2
 These are prompt files, not code (P7):
 - `plan.md` (07:30): reads `brain`, both calendars, `ocu tasks --jsonl`, `gh` issues and PRs, `drover ls`, and yesterday's log.
 - `shutdown` (18:30): deterministic, written in Rust, as `brain shutdown`. It reads commits and PRs across repos, task changes and drover runs, and writes them to `log/`.
-- `review.md` (Sunday): estimated vs actual time, deep-work hours, rollovers, like-rate, AUC.
+- `review.md` (Sunday): estimated vs actual time, deep-work hours, rollovers, like-rate, AUC, open contradictions.
+- `compile.md` (per queued doc) and `wiki-lint.md` (weekly): `reader` runs whose replies `brain wiki propose` turns into a branch (see Wiki).
 
 `brain plan checks` computes the challenge checks deterministically: free calendar time vs estimates, WIP above 3, items rolled over 3 or more times, no deep-work block. It prints them as `key: value` lines, which are pasted into the prompt.
 
@@ -234,6 +274,8 @@ The whole system lives in `~/brain`, `~/.local/state`, `~/.config/brain` and the
 - No claims table, open loops, reranker, contextual-retrieval prefixes or code embeddings until `brain eval` shows a failure that one of them fixes.
 - No storing of skipped candidates beyond their label.
 - No git remote for the vault.
+- No generated `index.md` or other derived file in the vault; `brain pages` is the catalog.
+- No page edit lands on `main` without a merge you made.
 
 ## Decided
 
@@ -242,8 +284,10 @@ The whole system lives in `~/brain`, `~/.local/state`, `~/.config/brain` and the
 - Brute-force vectors in BLOBs, no sqlite-vec.
 - Files win: any disagreement between a file and the index is resolved by reindexing.
 - The feed is a persistent pool with cursors per source, never a daily rebuild.
+- The wiki follows Karpathy's LLM Wiki, with two additions: every claim cites a doc, and every agent edit is a branch you merge.
 
 ## Open (design level)
 
 - Chunk size, 400 vs 800 tokens. Settled by the eval.
 - Embedder default: Qwen3-Embedding-0.6B on CPU vs 4B on an idle GPU. Settled by the eval.
+- Whether `find` should rank concept pages above the docs they cite. Settled by the eval once 20 concept pages exist.
