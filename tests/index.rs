@@ -890,3 +890,75 @@ fn embedding_goes_in_batches_and_huge_repo_docs_are_skipped() {
         Some(1)
     );
 }
+
+#[test]
+fn taint_body_links_and_schema_are_the_index_own() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    // A paper whose frontmatter claims `own`, with a matrix in its text.
+    env.doc(
+        "arxiv--2410.24164",
+        &json!({"id": "arxiv:2410.24164", "kind": "paper", "taint": "own",
+                "added": "2026-10-20T10:00:00+02:00", "title": "π0", "authors": ["A"],
+                "date": "2024-10-31", "links": {}}),
+        &format!("# Method\n\nR = [[1.0, 0.0], [0.0, 1.0]]. {INJECTION}\n"),
+    );
+    env.doc(
+        "file--0badc0de",
+        &json!({"id": "file:0badc0de", "kind": "note", "taint": "own",
+                "added": "2026-10-21T09:00:00+02:00", "title": "Notes"}),
+        "Read [[arxiv--2410.24164]] and [[jepa]].\n",
+    );
+    // An index an older brain built: schema 2.
+    fs::create_dir_all(env.db().parent().unwrap()).unwrap();
+    let old = rusqlite::Connection::open(env.db()).unwrap();
+    old.execute_batch("CREATE TABLE docs (id TEXT); PRAGMA user_version = 2;")
+        .unwrap();
+    drop(old);
+    env.ok(&["reindex"]);
+
+    let db = rusqlite::Connection::open(env.db()).unwrap();
+    let version: i32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 3);
+    let dst_index: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'links_dst'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dst_index, 1);
+    let mut stmt = db
+        .prepare("SELECT src, dst, rel FROM links ORDER BY src, dst")
+        .unwrap();
+    let links: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        links,
+        [
+            (
+                "file:0badc0de".into(),
+                "arxiv:2410.24164".into(),
+                "cites".into()
+            ),
+            ("file:0badc0de".into(), "jepa".into(), "mentions".into()),
+        ],
+        "only own text gives body links"
+    );
+
+    let got = env.ok(&["get", "arxiv:2410.24164"]);
+    assert!(got.contains("taint: external\n"), "{got}");
+    assert!(got.contains("<<<external"), "{got}");
+    let out = env.run(&["lint"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("arxiv--2410.24164.md,taint must be external for a paper"),
+    );
+}

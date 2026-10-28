@@ -119,7 +119,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "pattern": "^\\[\\[(arxiv|web|file|meeting|artifact)--[a-z0-9][a-z0-9.-]*\\]\\]$"
+        "pattern": "^\\[\\[(arxiv|web|file|meeting|artifact)--[a-z0-9][a-z0-9.-]*(\\|[^\\[\\]]+)?\\]\\]$"
       }
     },
     "card": {

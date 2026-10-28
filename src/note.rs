@@ -113,9 +113,11 @@ pub struct Link<'a> {
 }
 
 impl<'a> Link<'a> {
-    /// The inside of `[[...]]`.
+    /// The inside of `[[...]]`. The label after `|` is display text, as Obsidian writes a
+    /// link it resolved by alias (`[[<dir>|π0]]`); in a table the pipe is escaped, `\|`.
     fn parse(inner: &'a str) -> Option<Self> {
         let inner = inner.split('|').next().unwrap_or_default();
+        let inner = inner.strip_suffix('\\').unwrap_or(inner);
         let (target, heading) = match inner.split_once('#') {
             Some((t, h)) => (t, Some(h.trim()).filter(|h| !h.is_empty())),
             None => (inner, None),
@@ -156,11 +158,16 @@ pub enum Resolved<'a> {
 /// The names a vault's wikilinks can use, besides doc directory names.
 #[derive(Clone, Debug, Default)]
 pub struct Names {
+    docs: std::collections::BTreeSet<DocId>,
     pages: std::collections::BTreeSet<String>,
     aliases: std::collections::BTreeMap<String, Vec<Target>>,
 }
 
 impl Names {
+    pub fn add_doc(&mut self, id: DocId) {
+        self.docs.insert(id);
+    }
+
     pub fn add_page(&mut self, slug: &str) {
         self.pages.insert(slug.to_owned());
     }
@@ -181,17 +188,22 @@ impl Names {
         }
     }
 
+    /// A doc in the vault by its directory name, a page by its slug, an alias; then a
+    /// doc that is not in the vault (a paper `builds_on` names, a dead citation), so a
+    /// page whose slug reads as a directory name still resolves to the page.
     #[must_use]
     pub fn resolve(&self, target: &str) -> Resolved<'_> {
-        if let Ok(id) = DocId::from_dir(target) {
-            return Resolved::Found(Target::Doc(id));
+        let dir = DocId::from_dir(target).ok();
+        if let Some(id) = dir.as_ref().filter(|id| self.docs.contains(*id)) {
+            return Resolved::Found(Target::Doc(id.clone()));
         }
         if self.pages.contains(target) {
             return Resolved::Found(Target::Page(target.to_owned()));
         }
-        match self.aliases.get(target).map(Vec::as_slice) {
-            Some([one]) => Resolved::Found(one.clone()),
-            Some(many) if !many.is_empty() => Resolved::Ambiguous(many),
+        match (self.aliases.get(target).map(Vec::as_slice), dir) {
+            (Some([one]), _) => Resolved::Found(one.clone()),
+            (Some(many), _) if !many.is_empty() => Resolved::Ambiguous(many),
+            (_, Some(id)) => Resolved::Found(Target::Doc(id)),
             _ => Resolved::Unknown,
         }
     }
@@ -291,14 +303,15 @@ mod tests {
 
     #[test]
     fn links_and_relations() {
-        let ls = links("a [[x]] b [[y|Y]] [[arxiv--2410.24164#Method|m]] [[ ]]");
+        let ls = links("a [[x]] b [[y|Y]] [[arxiv--2410.24164#Method|m]] [[ ]] | [[z#h\\|t]] |");
         let got: Vec<_> = ls.iter().map(|l| (l.target, l.heading)).collect();
         assert_eq!(
             got,
             [
                 ("x", None),
                 ("y", None),
-                ("arxiv--2410.24164", Some("Method"))
+                ("arxiv--2410.24164", Some("Method")),
+                ("z", Some("h"))
             ]
         );
         let mut names = Names::default();

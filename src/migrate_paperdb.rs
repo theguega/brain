@@ -310,22 +310,23 @@ fn entry(
     lineage::link_successors(vault, &id, &successors).map(drop)
 }
 
-/// Every `docs/<dir>/` still holding `meta.json`, folded into its note. The `lineage`
-/// edges of all of them are read first: an edge `{src, dst}` (src builds on dst) may be
-/// stored in dst's meta only.
+/// Folds every `docs/<dir>/` still holding `meta.json` or `text.md` into its note, in two
+/// passes so a crash anywhere leaves what a rerun finishes. First each missing note is
+/// written, its `builds_on` from the `lineage` edges of every `meta.json` there (an edge
+/// `{src, dst}`, src building on dst, may be stored in dst's meta only). Only once all
+/// are written are old files removed, each only where the note already says what it
+/// says. A note is never overwritten: old files that disagree with it, as an older brain
+/// writes them beside it, stay for you to merge, and `brain lint` names them.
 fn fold_layout(vault: &Vault, r: &mut Report) {
-    let names: Vec<String> = names_of(&vault.path(Path::new("docs")))
+    let docs = Path::new("docs");
+    let old = |name: &str, file: &str| vault.path(&docs.join(name).join(file)).is_file();
+    let names: Vec<String> = names_of(&vault.path(docs))
         .into_iter()
-        .filter(|n| {
-            vault
-                .path(&Path::new("docs").join(n).join("meta.json"))
-                .is_file()
-        })
+        .filter(|n| old(n, "meta.json") || old(n, "text.md"))
         .collect();
     let mut preds: BTreeMap<DocId, Vec<DocId>> = BTreeMap::new();
-    for name in &names {
-        let path = vault.path(&Path::new("docs").join(name).join("meta.json"));
-        let Ok(meta) = read_json::<Value>(&path) else {
+    for name in names.iter().filter(|n| old(n, "meta.json")) {
+        let Ok(meta) = read_json::<Value>(&vault.path(&docs.join(name).join("meta.json"))) else {
             continue;
         };
         for e in meta
@@ -345,21 +346,87 @@ fn fold_layout(vault: &Vault, r: &mut Report) {
             }
         }
     }
-    for name in names {
-        let dir = Path::new("docs").join(&name);
-        match fold(vault, &name, &dir, &preds) {
+    let mut written = true;
+    for name in &names {
+        let Ok(id) = DocId::from_dir(name) else {
+            continue;
+        };
+        if vault.has_doc(&id) || !old(name, "meta.json") {
+            continue;
+        }
+        let folded =
+            folded(vault, &id, &preds).and_then(|(fm, body)| doc::write(vault, &id, fm, &body));
+        match folded {
             Ok(()) => r.converted += 1,
-            Err(e) => r.failed.push(format!("docs/{name}: {e}")),
+            Err(e) => {
+                written = false;
+                r.failed.push(format!("docs/{name}: {e}"));
+            }
+        }
+    }
+    // A failed note keeps every meta.json: its rerun needs their edges.
+    if !written {
+        return;
+    }
+    for name in &names {
+        if let Err(e) = tidy(vault, name, &preds, r) {
+            r.failed.push(format!("docs/{name}: {e}"));
         }
     }
 }
 
-/// `meta.json` becomes the note's frontmatter and `text.md` its body; then both go. The
-/// only values rewritten are the relations: a paper with `lineage` gets `builds_on`, the
-/// papers it builds on in `preds`, and a meeting's page slugs become wikilinks. Rerun
-/// after a crash between the write and the removals, it writes the same note again.
-fn fold(vault: &Vault, name: &str, dir: &Path, preds: &BTreeMap<DocId, Vec<DocId>>) -> Result<()> {
+/// Removes the old files of a folder whose note says the same: `meta.json` when the note's
+/// frontmatter is its fold (`builds_on` and `aliases` aside, which the fold derives),
+/// `text.md` when it is the note's body. Any other is reported and kept.
+fn tidy(
+    vault: &Vault,
+    name: &str,
+    preds: &BTreeMap<DocId, Vec<DocId>>,
+    r: &mut Report,
+) -> Result<()> {
     let id = DocId::from_dir(name)?;
+    let Some((mut fm, body)) = doc::read(vault, &id)? else {
+        return Ok(());
+    };
+    let dir = Vault::doc_dir(&id);
+    let derived = ["builds_on", "aliases"];
+    for k in derived {
+        fm.remove(k);
+    }
+    if vault.path(&dir.join("meta.json")).is_file() {
+        let (mut want, _) = folded(vault, &id, preds)?;
+        for k in derived {
+            want.remove(k);
+        }
+        if want == fm {
+            vault.remove(&dir.join("meta.json"))?;
+        } else {
+            r.warnings.push(format!(
+                "docs/{name}: meta.json beside the note disagrees with it; kept for you to merge"
+            ));
+        }
+    }
+    if let Some(text) = vault.read(&dir.join("text.md"))? {
+        if text == body {
+            vault.remove(&dir.join("text.md"))?;
+        } else {
+            r.warnings.push(format!(
+                "docs/{name}: text.md beside the note disagrees with its body; kept for you to merge"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The note `meta.json` and `text.md` make. The only values rewritten are the relations:
+/// a paper with `lineage` gets `builds_on`, the papers it builds on in `preds`, and a
+/// meeting's page slugs become wikilinks.
+fn folded(
+    vault: &Vault,
+    id: &DocId,
+    preds: &BTreeMap<DocId, Vec<DocId>>,
+) -> Result<(Fields, String)> {
+    let dir = Vault::doc_dir(id);
     let meta_path = dir.join("meta.json");
     let Value::Object(mut fm) = read_json::<Value>(&vault.path(&meta_path))? else {
         return Err(Error::Invalid {
@@ -369,7 +436,7 @@ fn fold(vault: &Vault, name: &str, dir: &Path, preds: &BTreeMap<DocId, Vec<DocId
     };
     let body = vault.read(&dir.join("text.md"))?.unwrap_or_default();
     if fm.remove("lineage").is_some() {
-        let ids = preds.get(&id).map_or(&[][..], Vec::as_slice);
+        let ids = preds.get(id).map_or(&[][..], Vec::as_slice);
         let links = lineage::builds_on(ids).into_iter().map(Value::String);
         fm.insert("builds_on".to_owned(), Value::Array(links.collect()));
     }
@@ -385,9 +452,7 @@ fn fold(vault: &Vault, name: &str, dir: &Path, preds: &BTreeMap<DocId, Vec<DocId
             *p = ingest::page_link(p);
         }
     }
-    doc::write(vault, &id, fm, &body)?;
-    vault.remove(&meta_path)?;
-    vault.remove(&dir.join("text.md"))
+    Ok((fm, body))
 }
 
 /// Copies through a temp file, so a cut copy never passes for the PDF.

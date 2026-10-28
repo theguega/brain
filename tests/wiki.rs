@@ -407,6 +407,35 @@ fn an_alias_cites_its_doc_and_an_ambiguous_one_fails() {
 }
 
 #[test]
+fn labelled_citations_cite_and_a_page_slug_like_a_doc_dir_is_a_page() {
+    let env = Env::new();
+    let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";
+    let text = fs::read_to_string(env.vault().join(note)).unwrap();
+    env.write(
+        note,
+        &format!("{text}# Method\n\nA flow matching action expert.\n"),
+    );
+    env.write(
+        "pages/web--notes.md",
+        "---\nkind: project\ntitle: Web notes\nsummary: x\nstatus: active\nsources: []\nupdated: 2026-10-27\n---\nSee [[pi0]].\n",
+    );
+    env.write(
+        "pages/pi0.md",
+        &page(
+            "Pi0",
+            PI0,
+            "Its action expert [[arxiv--2410.24164#Method|π0's method]]. See [[web--notes]].\n\n| claim | source |\n|---|---|\n| flow head | [[arxiv--2410.24164#Method\\|m]] |",
+        ),
+    );
+    let out = env.run(&["lint"]);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[0/0]{file,error}:\n"
+    );
+    assert!(!String::from_utf8(out.stderr).unwrap().contains("orphan"));
+}
+
+#[test]
 fn wiki_lint_finds_dead_links_citations_and_unlisted_sources() {
     let env = Env::new();
     let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";

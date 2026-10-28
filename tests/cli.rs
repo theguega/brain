@@ -862,3 +862,47 @@ fn skip_and_later_take_urls_like_like_does() {
         "id: arxiv:2410.24164\nverdict: skip\n"
     );
 }
+
+#[test]
+fn link_writes_yaml_that_lints_whatever_form_the_key_had() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    let fm =
+        "kind: project\ntitle: X\nsummary: x\nstatus: active\nsources: []\nupdated: 2026-10-27\n";
+    // Column-0 items, as serde-saphyr writes them; the flow form `wiki propose --help` shows.
+    env.write(
+        "vault/pages/col0.md",
+        &format!("---\n{fm}project:\n- \"[[a]]\"\n---\nb\n"),
+    );
+    env.write(
+        "vault/pages/flow.md",
+        &format!("---\n{fm}builds_on: [\"[[a]]\"]\n---\nb\n"),
+    );
+    env.write(
+        "vault/pages/a.md",
+        &format!("---\n{fm}---\nSee [[col0]], [[flow]], [[beta]].\n"),
+    );
+    env.write(
+        "vault/pages/beta.md",
+        &format!("---\n{fm}---\nSee [[a]].\n"),
+    );
+    env.ok(&["link", "col0", "brain", "project"]);
+    env.ok(&["link", "flow", "beta", "builds_on"]);
+    env.ok(&["link", "a", "beta", "superseded_by"]);
+    assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
+    assert!(
+        env.read("pages/col0.md")
+            .contains("project:\n  - \"[[a]]\"\n  - \"[[brain]]\"\n---")
+    );
+    assert!(
+        env.read("pages/a.md")
+            .contains("superseded_by: \"[[beta]]\"\n")
+    );
+    let out = env.run(&["link", "a", "col0", "superseded_by"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("holds one link and is already [[beta]]")
+    );
+}

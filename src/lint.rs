@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::contract::{self, Kind, Schema};
+use crate::doc::Taint;
 use crate::error::{Result, io};
 use crate::id::DocId;
 use crate::note;
@@ -31,14 +32,23 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
                 error,
             })
         };
+        let has_note = vault.path(&file).is_file();
         for old in ["meta.json", "text.md"] {
             if vault
                 .path(&Path::new("docs").join(&name).join(old))
                 .exists()
             {
-                finding(format!(
-                    "{old} is the old layout: run brain migrate-paperdb to fold it into the note"
-                ));
+                finding(if has_note {
+                    format!(
+                        "{old} beside the note: brain migrate-paperdb finishes a fold it \
+                         matches; if it does not, an older brain wrote it: merge what you \
+                         want into {name}.md and delete {old}"
+                    )
+                } else {
+                    format!(
+                        "{old} is the old layout: run brain migrate-paperdb to fold it into the note"
+                    )
+                });
             }
         }
         let Some(raw) = vault.read(&file)? else {
@@ -81,6 +91,19 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
         };
         for p in schema.problems(&meta) {
             finding(p.to_string());
+        }
+        // Set by brain from the kind and id; an edit would unfence external text (B5).
+        if let Some(id) = &dir_id {
+            let want = Taint::of(kind, id);
+            if serde_json::to_value(want).ok().as_ref() != meta.get("taint") {
+                finding(format!(
+                    "taint must be {} for a {kind}",
+                    serde_json::to_value(want)
+                        .unwrap_or_default()
+                        .as_str()
+                        .unwrap_or_default()
+                ));
+            }
         }
     }
 

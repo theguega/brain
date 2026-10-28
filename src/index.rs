@@ -23,7 +23,7 @@ use crate::vault::Vault;
 use crate::{doc, note, page};
 
 /// Bumped on any change to the tables or to chunking: a mismatch drops the index.
-pub const SCHEMA: i32 = 2;
+pub const SCHEMA: i32 = 3;
 
 const DDL: &str = "
 CREATE TABLE docs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
@@ -36,6 +36,7 @@ CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, model TEXT NOT NULL, dim INTEGE
     v BLOB NOT NULL);
 CREATE TABLE links (src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL);
 CREATE INDEX links_src ON links (src);
+CREATE INDEX links_dst ON links (dst);
 CREATE TABLE repos (name TEXT PRIMARY KEY, path TEXT NOT NULL, remote TEXT,
     head TEXT NOT NULL, indexed_at TEXT NOT NULL);
 ";
@@ -616,11 +617,9 @@ fn doc_source(vault: &Vault, names: &Names, dir: &str) -> Result<Source> {
     })?;
     let meta = Value::Object(fm);
     let kind = str_of(&meta, "kind").unwrap_or("note").to_owned();
-    let taint = match str_of(&meta, "taint") {
-        Some("own") => Taint::Own,
-        Some(_) => Taint::External,
-        None => Kind::parse(&kind).map_or(Taint::External, |k| Taint::of(k, &id)),
-    };
+    // From the kind and id, never the frontmatter: an edited `taint: own` must not unfence
+    // a paper (B5). `brain lint` reports the edit.
+    let taint = Kind::parse(&kind).map_or(Taint::External, |k| Taint::of(k, &id));
     let date = ["date", "started_at", "captured_at", "added"]
         .iter()
         .find_map(|k| str_of(&meta, k))
@@ -641,7 +640,11 @@ fn doc_source(vault: &Vault, names: &Names, dir: &str) -> Result<Source> {
     }
     text.push_str(&body);
     let id = id.to_string();
-    let mut links = note::body_links(&body, names);
+    // External text's `[[...]]` are matrices and markup, not links.
+    let mut links = match taint {
+        Taint::Own => note::body_links(&body, names),
+        Taint::External => Vec::new(),
+    };
     if let Value::Object(fm) = &meta {
         links.extend(note::relations(fm, names));
     }
@@ -683,10 +686,14 @@ fn page_source(vault: &Vault, names: &Names, slug: &str) -> Result<Source> {
 pub(crate) fn names(vault: &Vault) -> Result<Names> {
     let mut names = Names::default();
     for name in entries(vault, "docs")? {
-        if let Ok(id) = DocId::from_dir(&name)
-            && let Ok(Some((fm, _))) = doc::read(vault, &id)
-        {
-            names.add_aliases(&fm, &Target::Doc(id));
+        let Ok(id) = DocId::from_dir(&name) else {
+            continue;
+        };
+        if let Ok(Some((fm, _))) = doc::read(vault, &id) {
+            names.add_aliases(&fm, &Target::Doc(id.clone()));
+        }
+        if vault.has_doc(&id) {
+            names.add_doc(id);
         }
     }
     for name in entries(vault, "pages")? {

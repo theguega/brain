@@ -1020,3 +1020,114 @@ fn an_old_layout_vault_is_folded_into_notes_keeping_every_value() {
     assert_eq!(again.converted, 0);
     assert_eq!(snapshot(v.root()), before);
 }
+
+/// π0 and π0.5 in the older layout, the π0.5 builds_on π0 edge stored in π0's meta only.
+fn old_pair(docs: &Path) {
+    let paper = |id: &str, title: &str, lineage: Value| {
+        json!({
+            "id": id, "kind": "paper", "taint": "external", "added": "2026-10-02T12:00:00-07:00",
+            "title": title, "authors": ["A"], "date": "2024-10-31", "links": {}, "lineage": lineage,
+        })
+    };
+    let edge = json!([{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}]);
+    write(
+        &docs.join("arxiv--2410.24164/meta.json"),
+        paper("arxiv:2410.24164", "π0", edge).to_string(),
+    );
+    write(&docs.join("arxiv--2410.24164/text.md"), "# π0\n");
+    write(
+        &docs.join("arxiv--2504.16054/meta.json"),
+        paper("arxiv:2504.16054", "π0.5", json!([])).to_string(),
+    );
+    write(&docs.join("arxiv--2504.16054/text.md"), "# π0.5\n");
+}
+
+#[test]
+fn a_rerun_finishes_a_fold_cut_short_anywhere() {
+    let dir = tmp();
+    let v = vault(&dir);
+    let docs = v.root().join("docs");
+    let papers = dir.join("papers");
+    fs::create_dir_all(papers.join("papers")).unwrap();
+    let src = Sources {
+        papers: &papers,
+        journal: None,
+        readings: None,
+    };
+    let run = || migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    let pi05 = "docs/arxiv--2504.16054";
+    let note05 = docs.join("arxiv--2504.16054/arxiv--2504.16054.md");
+    let want = json!(["[[arxiv--2410.24164]]"]);
+
+    // Cut in the first pass: π0's note is written, π0.5's is not, every old file is there.
+    old_pair(&docs);
+    run();
+    fs::remove_file(&note05).unwrap();
+    old_pair(&docs);
+    let r = run();
+    assert_eq!((r.converted, r.failed.len()), (1, 0), "{r:#?}");
+    assert_eq!(meta(&v, pi05)["builds_on"], want);
+
+    // Cut in the second pass: π0's meta.json is gone, the edge it held is not lost.
+    let done = snapshot(v.root());
+    old_pair(&docs);
+    fs::remove_file(docs.join("arxiv--2410.24164/meta.json")).unwrap();
+    fs::remove_file(docs.join("arxiv--2410.24164/text.md")).unwrap();
+    let r = run();
+    assert_eq!((r.converted, r.warnings.len()), (0, 0), "{r:#?}");
+    assert_eq!(snapshot(v.root()), done);
+
+    // Cut between removing meta.json and text.md.
+    write(&docs.join("arxiv--2504.16054/text.md"), "# π0.5\n");
+    run();
+    assert_eq!(snapshot(v.root()), done);
+    assert!(brain::lint::lint(&v).unwrap().is_empty());
+}
+
+#[test]
+fn a_note_is_never_overwritten_by_old_files_beside_it() {
+    let dir = tmp();
+    let v = vault(&dir);
+    let docs = v.root().join("docs");
+    let papers = dir.join("papers");
+    fs::create_dir_all(papers.join("papers")).unwrap();
+    let src = Sources {
+        papers: &papers,
+        journal: None,
+        readings: None,
+    };
+    old_pair(&docs);
+    migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    let before = note(&v, "docs/arxiv--2410.24164");
+
+    // What an older brain's `add` writes beside the note: fresh metadata, new text.
+    let fresh = json!({
+        "id": "arxiv:2410.24164", "kind": "paper", "taint": "external",
+        "added": "2026-10-29T09:00:00-07:00", "title": "π0", "authors": ["A"],
+        "date": "2024-10-31", "links": {},
+    });
+    write(&docs.join("arxiv--2410.24164/meta.json"), fresh.to_string());
+    write(&docs.join("arxiv--2410.24164/text.md"), "# π0, refetched\n");
+    let r = migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    assert_eq!(r.converted, 0);
+    assert_eq!(note(&v, "docs/arxiv--2410.24164"), before);
+    assert!(warned(
+        &r,
+        "docs/arxiv--2410.24164: meta.json beside the note disagrees"
+    ));
+    assert!(warned(
+        &r,
+        "docs/arxiv--2410.24164: text.md beside the note disagrees"
+    ));
+    assert!(docs.join("arxiv--2410.24164/meta.json").is_file());
+    let errors: Vec<String> = brain::lint::lint(&v)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.error)
+        .collect();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        errors[0].starts_with("meta.json beside the note"),
+        "{errors:?}"
+    );
+}
