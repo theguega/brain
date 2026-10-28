@@ -1,9 +1,9 @@
 [package]
-name = "paperdb"
+name = "brain"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Personal paper library: one binary, a git-synced folder, an agent skill."
+description = "Brain: the personal knowledge layer. Vault files, a rebuildable index, one CLI, one agent skill."
 license = "MIT"
 repository = "https://github.com/theguega/paperdb"
 

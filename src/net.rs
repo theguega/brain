@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::error::{Error, Result, io};
 
 const UA: &str = concat!(
-    "paperdb/",
+    "brain/",
     env!("CARGO_PKG_VERSION"),
     " (personal paper library)"
 );

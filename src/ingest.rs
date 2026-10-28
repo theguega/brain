@@ -100,7 +100,7 @@ pub fn fetch_text(lib: &Library, paper: &Paper, route: Route) -> Result<Via> {
             let md = read_page(url).ok_or_else(|| {
                 no_text(
                     &id,
-                    "the page reader was blocked; pipe the text in with `paperdb text <id> -`",
+                    "the page reader was blocked; pipe the text in with `brain text <id> -`",
                 )
             })?;
             lib.save_text(&id, &md)?;

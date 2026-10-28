@@ -1,4 +1,4 @@
-//! paperdb: a personal paper library.
+//! brain: a personal paper library.
 //!
 //! The library is a folder of plain files synced with git (see [`library`]); the
 //! search index is a disposable cache rebuilt from it (see [`index`]).

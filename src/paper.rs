@@ -273,7 +273,7 @@ pub struct Open {
     pub data: Option<bool>,
 }
 
-/// Shown by `paperdb card schema`: what an agent fills in.
+/// Shown by `brain card schema`: what an agent fills in.
 pub const CARD_TEMPLATE: &str = r#"{
   "family": "vla | wam | world-model | diffusion-policy | rl | control | benchmark | dataset | library | other",
   "backbone": "e.g. PaliGemma-3B, or null",

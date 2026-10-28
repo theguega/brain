@@ -42,7 +42,7 @@ pub enum Error {
     Unknown(String),
     #[error("no text for {id}: {why}")]
     NoText { id: String, why: String },
-    #[error("no library at {} (run `paperdb init`, or set PAPERDB_LIBRARY)", .0.display())]
+    #[error("no library at {} (run `brain init`, or set PAPERDB_LIBRARY)", .0.display())]
     NoLibrary(PathBuf),
     #[error("{failed} of {total} not added (errors above)")]
     Partial { failed: usize, total: usize },

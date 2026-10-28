@@ -3,24 +3,24 @@ name: paperdb
 description: "Personal paper researcher library. Use to (1) search or answer questions from papers he has saved; (2) add a paper he mentions or links (arXiv id/URL, HF paper URL, PDF); (3) look for new papers and triage the inbox; (4) fill structured cards for papers. Triggers: 'paperdb', 'my papers', 'add this paper', 'what does <paper> say', 'find papers on <topic>', 'anything new on <topic>', an arXiv or huggingface.co/papers link."
 ---
 
-# paperdb
+# brain
 
-`paperdb` is a CLI over a personal paper library: a git repo of plain files at
+`brain` is a CLI over a personal paper library: a git repo of plain files at
 `$PAPERDB_LIBRARY` (default `~/papers`). Every paper in it was chosen by the user,
 so do not add papers on your own initiative; propose, and add what they confirm.
-Run `paperdb` alone for the library's status (paper counts, inbox, unpushed
-commits), and `paperdb help` for every flag. Exit codes: 2 means fix the command,
+Run `brain` alone for the library's status (paper counts, inbox, unpushed
+commits), and `brain help` for every flag. Exit codes: 2 means fix the command,
 3 means the paper is not in the library (search for it), 4 means a network failure
 (retry later).
 
 ## Answer from the library
 
 ```bash
-paperdb search "flow matching action chunking"            # ranked, with snippets
-paperdb search "" --where "family = 'vla' AND open_weights = 1 AND control_hz >= 30"
-paperdb search "reward model" --tag rl --limit 50 --json  # --json for parsing
-paperdb show 2410.24164                                   # record + card
-paperdb show 2410.24164 --text                            # full text (markdown)
+brain search "flow matching action chunking"            # ranked, with snippets
+brain search "" --where "family = 'vla' AND open_weights = 1 AND control_hz >= 30"
+brain search "reward model" --tag rl --limit 50 --json  # --json for parsing
+brain show 2410.24164                                   # record + card
+brain show 2410.24164 --text                            # full text (markdown)
 ```
 
 - Search covers name, title, abstract, Hub keywords, tags, note and full text, stemmed.
@@ -33,7 +33,7 @@ paperdb show 2410.24164 --text                            # full text (markdown)
   `text_path` from `show --json` with your file tool; papers are long, so grep for
   the section you need before reading it all.
 - The Hub's markdown flattens tables. If a table's numbers look ambiguous, run
-  `paperdb text <id> --pdf` to re-extract the text from the PDF, then re-read.
+  `brain text <id> --pdf` to re-extract the text from the PDF, then re-read.
 - Cite papers by name and arXiv id.
 
 ## Add papers (and blog posts)
@@ -41,10 +41,10 @@ paperdb show 2410.24164 --text                            # full text (markdown)
 The user finds things to read and asks you to add them. Add exactly what they name.
 
 ```bash
-paperdb add 2410.24164 --name pi0 --tag vla --note "why it matters"
-paperdb add https://arxiv.org/abs/2503.14734 https://huggingface.co/papers/2506.01844
-paperdb add https://www.pi.website/blog/pi05 --title "π0.5: ..." --name pi05-blog --tag blog
-paperdb add https://example.org/report.pdf --title "Pinocchio: ..." --name pinocchio
+brain add 2410.24164 --name pi0 --tag vla --note "why it matters"
+brain add https://arxiv.org/abs/2503.14734 https://huggingface.co/papers/2506.01844
+brain add https://www.pi.website/blog/pi05 --title "π0.5: ..." --name pi05-blog --tag blog
+brain add https://example.org/report.pdf --title "Pinocchio: ..." --name pinocchio
 ```
 
 - `add` fetches metadata and full text, then commits. Adding a paper that is already
@@ -57,12 +57,12 @@ paperdb add https://example.org/report.pdf --title "Pinocchio: ..." --name pinoc
 - Anything not on arXiv (blog post, tech report, project page) needs a `--title`; give a
   `--name` too, it becomes the id. Tag blog posts `blog`.
 - `NO TEXT` on a web page means the site blocked the reader. Fetch the page with your
-  own web tools and pipe its main text in as markdown: `paperdb text <id> - <<'EOF'`.
+  own web tools and pipe its main text in as markdown: `brain text <id> - <<'EOF'`.
 - Give a `--name` (the short handle people use: "pi0", "DreamerV3", "OpenVLA").
-- Tags: lowercase slugs. Run `paperdb tags` and reuse the existing tags rather
+- Tags: lowercase slugs. Run `brain tags` and reuse the existing tags rather
   than inventing near-duplicates. `starred` marks the
   user's key papers (it also steers `discover`); only set it when they say so.
-- Edit later with `paperdb tag <id> +t -t`, `paperdb name <id> X`, `paperdb note <id> "..."`.
+- Edit later with `brain tag <id> +t -t`, `brain name <id> X`, `brain note <id> "..."`.
 - After adding, write a card (below) unless the user is adding many at once and
   says to skip it.
 
@@ -70,23 +70,23 @@ paperdb add https://example.org/report.pdf --title "Pinocchio: ..." --name pinoc
 
 A card is structured data extracted from the paper text. Fill one per paper:
 
-1. `paperdb card schema` shows the fields and allowed values.
+1. `brain card schema` shows the fields and allowed values.
 2. Read the full text (`show --text`, or `text_path` from `show --json`).
-3. `paperdb card set <id> <<'EOF'` followed by the JSON and `EOF`.
+3. `brain card set <id> <<'EOF'` followed by the JSON and `EOF`.
 
 Rules: `null`, `[]` or `{}` means the paper does not say. **Never infer or guess.**
 Eval scores are success rates as fractions (0.93), keyed by benchmark or task name.
 `limits` are failure modes the paper itself admits. `card set` rejects unknown
 fields and values; fix the JSON, don't drop the field silently.
-`paperdb card todo` lists papers that have text but no card.
+`brain card todo` lists papers that have text but no card.
 
 ## Find new papers
 
 ```bash
-paperdb discover            # ~20 new papers like the library, best first
-paperdb inbox --json        # what was listed and not yet triaged
-paperdb add <id> ...        # the user wants it
-paperdb skip <id> ...       # not interested; skip --all clears the rest
+brain discover            # ~20 new papers like the library, best first
+brain inbox --json        # what was listed and not yet triaged
+brain add <id> ...        # the user wants it
+brain skip <id> ...       # not interested; skip --all clears the rest
 ```
 
 `discover` asks Semantic Scholar for recent papers like the starred and recently
@@ -99,8 +99,8 @@ say so, skip the rest.
 
 ## Sync and setup
 
-- `paperdb sync` commits, pulls (rebase) and pushes. Run it after a batch of
+- `brain sync` commits, pulls (rebase) and pushes. Run it after a batch of
   changes, and before starting work on a machine that may be behind.
 - Each change already commits locally; never hand-edit `.cache/` (the index rebuilds itself).
 - New machine: `cargo install --git https://github.com/theguega/paperdb`, then
-  `paperdb init <library-git-url>`, then `paperdb skill install`.
+  `brain init <library-git-url>`, then `brain skill install`.
