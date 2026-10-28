@@ -59,8 +59,8 @@ pub fn edges(id: &DocId, pwc: &pwc::Paper) -> Vec<Edge> {
 /// What a PwC reply adds to a paper.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answer {
-    /// `None` unless PwC sent its predecessor or successor list: a 404 or an empty
-    /// record is no answer, and the paper is retried.
+    /// `None` unless PwC has a record for the paper: a 404 or an empty `{}` is no
+    /// answer, and the paper is retried. A record's `null` lists mean none, so `[]`.
     pub lineage: Option<Vec<Edge>>,
     pub tldr: Option<String>,
     pub venue: Option<String>,
@@ -72,7 +72,8 @@ impl Answer {
         let Some(p) = found else {
             return Self::default();
         };
-        let answered = p.predecessor_papers.is_some() || p.successor_papers.is_some();
+        let answered =
+            p.arxiv_id.is_some() || p.predecessor_papers.is_some() || p.successor_papers.is_some();
         Self {
             lineage: answered.then(|| edges(id, &p)),
             tldr: p.tldr.filter(|t| !t.is_empty()),

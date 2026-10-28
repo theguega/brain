@@ -286,6 +286,7 @@ fn fixture(dir: &Path) -> Fixture {
 /// PwC: π0 has lineage, FAST is unknown (404).
 fn pwc_stub(id: &ArxivId) -> Result<Option<pwc::Paper>> {
     Ok((id.as_str() == "2410.24164").then(|| pwc::Paper {
+        arxiv_id: Some("2410.24164".to_owned()),
         tldr: Some("Flow matching on a VLM.".to_owned()),
         conference_name: Some("RSS".to_owned()),
         predecessor_papers: Some(vec![]),
@@ -739,4 +740,47 @@ fn a_failed_copy_leaves_no_temp_file() {
     );
     let left: Vec<_> = fs::read_dir(v.path(Path::new("docs/x"))).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_pwc_record_with_null_lists_is_an_answer() {
+    let id = brain::DocId::parse("arxiv:2410.24164").unwrap();
+    let parse = |s: &str| serde_json::from_str::<pwc::Paper>(s).unwrap();
+    let none = parse(
+        r#"{"arxiv_id": "2410.24164", "predecessor_papers": null, "successor_papers": null}"#,
+    );
+    assert_eq!(lineage::Answer::of(&id, Some(none)).lineage, Some(vec![]));
+    assert_eq!(lineage::Answer::of(&id, Some(parse("{}"))).lineage, None);
+}
+
+/// Fails for π0, answers with no lineage for FAST.
+fn pwc_flaky(id: &ArxivId) -> Result<Option<pwc::Paper>> {
+    if id.as_str() == "2410.24164" {
+        return pwc_down(id);
+    }
+    Ok(Some(pwc::Paper {
+        arxiv_id: Some(id.as_str().to_owned()),
+        ..pwc::Paper::default()
+    }))
+}
+
+#[test]
+fn one_pwc_failure_costs_only_that_paper() {
+    let dir = tmp();
+    let fx = fixture(&dir);
+    let v = vault(&dir);
+    let src = Sources {
+        papers: &fx.papers,
+        journal: None,
+        readings: None,
+    };
+    let net = Lookups {
+        pwc: &pwc_flaky,
+        hal: &hal_stub,
+    };
+    let r = migrate::run(&v, &src, &now(), net);
+    assert_eq!(r.lineage, 1);
+    assert!(warned(&r, "arxiv:2410.24164: papers with code"));
+    assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());
+    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["lineage"], json!([]));
 }

@@ -29,6 +29,9 @@ use crate::{chunk, hal, ingest};
 /// paperdb and drover stored days, not times: each becomes noon of that day in the
 /// current zone, which keeps the day whatever zone it is later read in.
 const NOON: &str = "12:00";
+/// Papers with Code failures in a row after which it counts as down for this run: one
+/// slow reply must not cost every paper after it its lineage.
+const PWC_GIVE_UP: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Sources<'a> {
@@ -72,11 +75,11 @@ pub struct Report {
 
 pub fn run(vault: &Vault, src: &Sources<'_>, now: &Now, net: Lookups<'_>) -> Report {
     let mut r = Report::default();
-    let mut pwc_up = true;
+    let mut pwc_misses = 0;
     match names(&src.papers.join("papers")) {
         Ok(names) => {
             for name in names {
-                if let Err(e) = entry(vault, src.papers, &name, now, net, &mut pwc_up, &mut r) {
+                if let Err(e) = entry(vault, src.papers, &name, now, net, &mut pwc_misses, &mut r) {
                     r.failed.push(format!("papers/{name}: {e}"));
                 }
             }
@@ -168,7 +171,7 @@ fn entry(
     name: &str,
     now: &Now,
     net: Lookups<'_>,
-    pwc_up: &mut bool,
+    pwc_misses: &mut u32,
     r: &mut Report,
 ) -> Result<()> {
     let dir = root.join("papers").join(name);
@@ -221,18 +224,22 @@ fn entry(
     }
     match &old.source {
         OldSource::Arxiv(aid) => {
-            if *pwc_up {
+            if *pwc_misses < PWC_GIVE_UP {
                 match (net.pwc)(aid) {
                     Ok(found) => {
-                        if Answer::of(&id, found).fill(&mut doc.body)? {
-                            r.lineage += usize::from(doc.body.get("lineage").is_some());
-                        }
+                        *pwc_misses = 0;
+                        Answer::of(&id, found).fill(&mut doc.body)?;
+                        r.lineage += usize::from(doc.body.get("lineage").is_some());
                     }
-                    // Down: the rest would fail too, and `reindex` retries them all.
                     Err(e) => {
-                        *pwc_up = false;
+                        *pwc_misses += 1;
+                        let then = if *pwc_misses == PWC_GIVE_UP {
+                            "PwC looks down; reindex will retry lineage for the rest"
+                        } else {
+                            "reindex will retry its lineage"
+                        };
                         r.warnings
-                            .push(format!("papers with code: {e}; reindex will retry lineage"));
+                            .push(format!("{id}: papers with code: {e}; {then}"));
                     }
                 }
             }
