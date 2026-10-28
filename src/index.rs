@@ -168,6 +168,29 @@ pub struct Counts {
 
 /// Incremental by content hash; `full` starts from an empty index.
 pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> Result<Counts> {
+    sync(vault, path, full, embedder, true)
+}
+
+/// [`reindex`] without the embedder: `brain tick` fills vectors as its own job (S6).
+pub fn reindex_text(vault: &Vault, path: &Path, embedder: &Embedder) -> Result<Counts> {
+    sync(vault, path, false, embedder, false)
+}
+
+/// Fills the chunks without a vector; the error is the embedder's, after the vectors it did give.
+pub fn embed(path: &Path, embedder: &Embedder) -> Result<(usize, Option<Error>)> {
+    Ok(embed_missing(&mut Index::open_existing(path)?, embedder))
+}
+
+/// Chunks without a vector from `model`; none when there is no index yet.
+pub fn unembedded(path: &Path, model: &str) -> Result<usize> {
+    match Index::open_existing(path) {
+        Ok(ix) => missing_vectors(&ix, model),
+        Err(Error::NoIndex) => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool) -> Result<Counts> {
     if full {
         remove(path)?;
     }
@@ -262,10 +285,12 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     }
     tx.commit()?;
 
-    let (embedded, err) = embed_missing(&mut ix, embedder);
-    counts.embedded = embedded;
-    if let Some(e) = err {
-        counts.warnings.push(format!("embedder: {e}"));
+    if fill {
+        let (embedded, err) = embed_missing(&mut ix, embedder);
+        counts.embedded = embedded;
+        if let Some(e) = err {
+            counts.warnings.push(format!("embedder: {e}"));
+        }
     }
     let count = |sql: &str| -> Result<usize> {
         Ok(ix
