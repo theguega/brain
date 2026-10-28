@@ -3,15 +3,15 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use paperdb::date::Day;
-use paperdb::discover::{self, Inbox};
-use paperdb::index::{Index, Query};
-use paperdb::ingest::{self, Route};
-use paperdb::library::SyncOutcome;
-use paperdb::paper::CARD_TEMPLATE;
-use paperdb::{Card, Error, Library, Paper, PaperId, Result, Slug, Source, Tag};
+use brain::date::Day;
+use brain::discover::{self, Inbox};
+use brain::index::{Index, Query};
+use brain::ingest::{self, Route};
+use brain::library::SyncOutcome;
+use brain::paper::CARD_TEMPLATE;
+use brain::{Card, Error, Library, Paper, PaperId, Result, Slug, Source, Tag};
 
-/// `println!` that exits quietly when stdout is closed (`paperdb search | head`)
+/// `println!` that exits quietly when stdout is closed (`brain search | head`)
 /// instead of panicking on the broken pipe.
 macro_rules! out {
     ($($t:tt)*) => {{
@@ -34,7 +34,7 @@ macro_rules! out_raw {
 const SKILL: &str = include_str!("../skill/SKILL.md");
 
 const HELP: &str = "\
-paperdb - personal paper library
+brain - personal paper library
 
 Library: $PAPERDB_LIBRARY or ~/papers (a git repo of plain files).
 Run with no arguments for the library's status.
@@ -73,9 +73,9 @@ fn main() -> ExitCode {
     match run(&raw) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("paperdb: {e}");
+            eprintln!("brain: {e}");
             if let Error::NotFound(r) = &e {
-                eprintln!("try `paperdb search {r}`");
+                eprintln!("try `brain search {r}`");
             }
             ExitCode::from(e.exit_code())
         }
@@ -96,7 +96,7 @@ fn run(raw: &[String]) -> Result<()> {
     let lib = || Library::open(&root);
     match cmd.as_str() {
         "help" | "-h" | "--help" => out_raw!("{HELP}"),
-        "-V" | "--version" | "version" => out!("paperdb {}", env!("CARGO_PKG_VERSION")),
+        "-V" | "--version" | "version" => out!("brain {}", env!("CARGO_PKG_VERSION")),
         "path" => out!("{}", root.display()),
         "init" => init(&root, &Args::parse(rest, &[], &[])?)?,
         "add" => add(
@@ -129,20 +129,20 @@ fn run(raw: &[String]) -> Result<()> {
         "skill" => skill(&Args::parse(rest, &[], &[])?)?,
         other => {
             return Err(usage(&format!(
-                "unknown command {other:?}; see `paperdb help`"
+                "unknown command {other:?}; see `brain help`"
             )));
         }
     }
     Ok(())
 }
 
-/// Bare `paperdb`: what is in the library and what needs doing, without network calls.
+/// Bare `brain`: what is in the library and what needs doing, without network calls.
 fn status(root: &std::path::Path) -> Result<()> {
     let lib = match Library::open(root) {
         Ok(lib) => lib,
         Err(Error::NoLibrary(_)) => {
             out!("no library at {}", root.display());
-            out!("next: `paperdb init` (or `paperdb init <git-url>`); `paperdb help` for commands");
+            out!("next: `brain init` (or `brain init <git-url>`); `brain help` for commands");
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -158,21 +158,17 @@ fn status(root: &std::path::Path) -> Result<()> {
     let pending = Inbox::load(&lib)?.pending().len();
     out!(
         "inbox    {pending} to triage{}",
-        if pending > 0 {
-            " (`paperdb inbox`)"
-        } else {
-            ""
-        }
+        if pending > 0 { " (`brain inbox`)" } else { "" }
     );
     match lib.unpushed() {
         None => out!("git      no remote"),
         Some(0) => out!("git      up to date with last fetch"),
-        Some(n) => out!("git      {n} unpushed commits (`paperdb sync`)"),
+        Some(n) => out!("git      {n} unpushed commits (`brain sync`)"),
     }
     if st.no_card > 0 {
-        out!("next: `paperdb card todo` lists papers to card");
+        out!("next: `brain card todo` lists papers to card");
     }
-    out!("`paperdb help` for commands");
+    out!("`brain help` for commands");
     Ok(())
 }
 
@@ -184,10 +180,7 @@ fn tags(lib: &Library, a: &Args) -> Result<()> {
     for (t, n) in &tags {
         out!("{n:4} {t}");
     }
-    out!(
-        "{} tags; filter with `paperdb search --tag <t>`",
-        tags.len()
-    );
+    out!("{} tags; filter with `brain search --tag <t>`", tags.len());
     Ok(())
 }
 
@@ -197,7 +190,7 @@ fn init(root: &std::path::Path, a: &Args) -> Result<()> {
         None => Library::create(root)?,
     };
     out!("library ready at {}", lib.root().display());
-    out!("next: `paperdb skill install`, then `paperdb add <arxiv-id>`");
+    out!("next: `brain skill install`, then `brain add <arxiv-id>`");
     Ok(())
 }
 
@@ -233,7 +226,7 @@ fn add(lib: &Library, a: &Args) -> Result<()> {
                 }
             }
             Err(e) => {
-                eprintln!("paperdb: {r}: {e}");
+                eprintln!("brain: {r}: {e}");
                 failed += 1;
             }
         }
@@ -247,7 +240,7 @@ fn add(lib: &Library, a: &Args) -> Result<()> {
         });
     }
     if let [id] = added.as_slice() {
-        out!("next: `paperdb card schema`, then `paperdb card set {id}`");
+        out!("next: `brain card schema`, then `brain card set {id}`");
     }
     Ok(())
 }
@@ -380,7 +373,7 @@ fn show(lib: &Library, a: &Args) -> Result<()> {
     if a.has("--text") {
         let body = lib
             .text(&id)?
-            .ok_or_else(|| usage(&format!("no text for {id}; run `paperdb text {id}`")))?;
+            .ok_or_else(|| usage(&format!("no text for {id}; run `brain text {id}`")))?;
         out_raw!("{body}");
         return Ok(());
     }
@@ -509,7 +502,7 @@ fn card(lib: &Library, a: &Args) -> Result<()> {
             let id = lib.find(r)?;
             let mut p = lib.load(&id)?;
             let c: Card = serde_json::from_str(&stdin()?).map_err(|source| Error::Decode {
-                what: "card on stdin (see `paperdb card schema`)",
+                what: "card on stdin (see `brain card schema`)",
                 source,
             })?;
             p.card = Some(c);
@@ -521,7 +514,7 @@ fn card(lib: &Library, a: &Args) -> Result<()> {
             let id = lib.find(r)?;
             match lib.load(&id)?.card {
                 Some(c) => print_json(&c)?,
-                None => out!("no card for {id}; see `paperdb card schema`"),
+                None => out!("no card for {id}; see `brain card schema`"),
             }
         }
         _ => return Err(usage("card <id> | card set <id> | card todo | card schema")),
@@ -563,7 +556,7 @@ fn run_discover(lib: &Library, a: &Args) -> Result<()> {
     }
     print_candidates(&fresh.iter().collect::<Vec<_>>());
     out!(
-        "{} new; add what you like, `paperdb skip --all` for the rest",
+        "{} new; add what you like, `brain skip --all` for the rest",
         fresh.len()
     );
     Ok(())
@@ -577,7 +570,7 @@ fn inbox(lib: &Library, a: &Args) -> Result<()> {
     }
     print_candidates(&pending);
     out!(
-        "{} to triage: `paperdb add <id>` or `paperdb skip <id>`",
+        "{} to triage: `brain add <id>` or `brain skip <id>`",
         pending.len()
     );
     Ok(())
@@ -585,12 +578,12 @@ fn inbox(lib: &Library, a: &Args) -> Result<()> {
 
 fn skip(lib: &Library, a: &Args) -> Result<()> {
     let mut inbox = Inbox::load(lib)?;
-    let ids: Vec<paperdb::ArxivId> = if a.has("--all") {
+    let ids: Vec<brain::ArxivId> = if a.has("--all") {
         inbox.pending().into_iter().map(|c| c.id.clone()).collect()
     } else {
         a.pos
             .iter()
-            .map(|s| paperdb::ArxivId::parse(s))
+            .map(|s| brain::ArxivId::parse(s))
             .collect::<Result<_>>()?
     };
     // Skipping is idempotent; an id the inbox never listed is reported, not fatal,
@@ -600,7 +593,7 @@ fn skip(lib: &Library, a: &Args) -> Result<()> {
         if inbox.skip(id) {
             skipped += 1;
         } else {
-            eprintln!("paperdb: {id} is not in the inbox; ignored");
+            eprintln!("brain: {id} is not in the inbox; ignored");
         }
     }
     inbox.save(lib)?;
