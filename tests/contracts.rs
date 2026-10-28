@@ -7,13 +7,13 @@
 
 use brain::contract::{self, JobLine, Kind, Problem, Profile, Repo, Schema};
 use brain::doc::{
-    Artifact, Card, Doc, Edge, Family, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web,
+    Artifact, Card, Doc, Family, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web,
 };
 use brain::label::{Label, Verdict};
 use brain::log::Entry;
-use brain::page::{Frontmatter, Link, PageKind};
+use brain::page::{Frontmatter, PageKind};
 use brain::time::Context;
-use brain::{DocId, Rel, Slug};
+use brain::{DocId, Slug};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -129,11 +129,7 @@ fn c1_doc_types_match_their_schemas() {
         tldr: Some("Flow matching on a VLM.".to_owned()),
         summary: Some("A VLA.".to_owned()),
         keywords: vec!["vla".to_owned()],
-        lineage: Some(vec![Edge {
-            src: DocId::parse("arxiv:2504.16054").unwrap(),
-            dst: DocId::parse("arxiv:2410.24164").unwrap(),
-            rel: Rel::parse("builds_on").unwrap(),
-        }]),
+        builds_on: Some(vec!["[[arxiv--2504.16054]]".to_owned()]),
         card: Some(card),
     };
     let paper = doc("arxiv:2410.24164", Kind::PAPER, paper);
@@ -170,8 +166,8 @@ fn c1_doc_types_match_their_schemas() {
         started_at: AT.to_owned(),
         tz: "Europe/Paris".to_owned(),
         place: Some("Paris".to_owned()),
-        attendees: vec!["alice".to_owned()],
-        project: Some("brain".to_owned()),
+        attendees: vec!["[[alice]]".to_owned()],
+        project: Some("[[brain]]".to_owned()),
     };
     assert_valid(
         "meeting",
@@ -233,15 +229,19 @@ fn other_contract_types_match_their_schemas() {
         status: "active".to_owned(),
         sources: vec![DocId::parse("arxiv:2410.24164").unwrap()],
         updated: "2026-10-27".to_owned(),
-        superseded_by: Some(Slug::parse("chunking-v2").unwrap()),
+        superseded_by: Some("[[chunking-v2]]".to_owned()),
         aliases: vec!["chunking".to_owned()],
         tags: vec!["robotics/policy".to_owned()],
-        links: vec![Link {
-            rel: Rel::parse("builds_on").unwrap(),
-            dst: "arxiv:2410.24164".to_owned(),
-        }],
     };
     assert_valid("page", contract::PAGE, &fm);
+    let slug = Frontmatter {
+        superseded_by: Some("chunking-v2".to_owned()),
+        ..fm
+    };
+    assert!(
+        !problems("page", contract::PAGE, &slug).is_empty(),
+        "a relation is a wikilink"
+    );
 
     let entry = Entry {
         at: AT.to_owned(),

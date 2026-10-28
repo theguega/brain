@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::label::{FILE as LABELS, Label, Verdict};
 use crate::time::Now;
 use crate::vault::Vault;
-use crate::{log, page, tokens};
+use crate::{log, note, tokens};
 
 pub const FILE: &str = "profile.md";
 pub const MAX_TOKENS: usize = 400;
@@ -104,7 +104,7 @@ fn focus(vault: &Vault) -> Result<Vec<String>> {
     let Some(text) = vault.read(Path::new("pages/me.md"))? else {
         return Ok(Vec::new());
     };
-    let body = page::split(&text).map_or(text.as_str(), |(_, b)| b);
+    let body = note::split(&text).map_or(text.as_str(), |(_, b)| b);
     Ok(body
         .lines()
         .map(|l| l.trim().trim_start_matches(['-', '*']).trim())
@@ -132,7 +132,7 @@ fn projects(vault: &Vault, today: i64) -> Result<Vec<String>> {
         let text = vault
             .read(&Path::new("pages").join(&name))?
             .unwrap_or_default();
-        let Some(fm) = page::split(&text).and_then(|(y, _)| page::parse_yaml(y).ok()) else {
+        let Some(fm) = note::split(&text).and_then(|(y, _)| note::parse(y).ok()) else {
             continue;
         };
         let get = |k: &str| fm.get(k).and_then(Value::as_str).unwrap_or_default();

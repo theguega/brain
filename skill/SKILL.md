@@ -14,8 +14,9 @@ today's plan and what needs them. Read it first.
 
 - Search first (`find`), then open what matched (`get <id>`). Search with the words a doc
   would use, not your paraphrase; try two or three phrasings.
-- Prefer a wiki page over the docs it cites. A claim there ends in `[@<doc-id>]`: open it
-  to check the source before relying on the claim.
+- Prefer a wiki page over the docs it cites. A claim there ends in a wikilink to its doc,
+  `[[arxiv--2410.24164#Method]]`: open it (`get arxiv:2410.24164#Method`) to check the
+  source before relying on the claim.
 - For code, `code` greps the user's repos live. The index holds only their READMEs, design
   docs and commit messages.
 - A list prints as `name[shown/total]{columns}`: if shown is below total, narrow the

@@ -277,6 +277,20 @@ fn decode_entities(s: &str) -> String {
     out
 }
 
+/// What a snippet keeps of `[[inner]]`: its label, else a page's name; a citation (a
+/// link to a doc) is dropped.
+fn wikilink_text(inner: &str) -> &str {
+    if let Some((_, label)) = inner.split_once('|') {
+        return label;
+    }
+    let target = inner.split('#').next().unwrap_or_default();
+    if crate::id::DocId::from_dir(target.trim()).is_ok() {
+        ""
+    } else {
+        target
+    }
+}
+
 /// Chunk text as one clean line: no tables, code fences, headings markers, emphasis,
 /// link syntax, citations or tags.
 #[must_use]
@@ -300,10 +314,9 @@ pub(crate) fn plain(text: &str) -> String {
     let mut rest = joined.as_str();
     while let Some(c) = rest.chars().next() {
         let skip = match c {
-            '[' if rest.starts_with("[@") => rest.find(']').map(|e| (e + 1, "")),
             '[' if rest.starts_with("[[") => rest
                 .find("]]")
-                .map(|e| (e + 2, rest.get(2..e).unwrap_or_default())),
+                .map(|e| (e + 2, wikilink_text(rest.get(2..e).unwrap_or_default()))),
             '!' | '[' => link(rest),
             '<' => rest
                 .find('>')
@@ -422,10 +435,11 @@ mod tests {
     #[test]
     fn plain_drops_markup_and_tables() {
         let s = plain(
-            "## Head\n\nSee **bold** and [the link](http://x.y) or [[page]] [@arxiv:1]\n\n| a | b |\n|---|---|\n\n<b>tag</b> `code`",
+            "## Head\n\nSee **bold** and [the link](http://x.y) or [[page#h]] [[arxiv--2410.24164#Method]]\n\n| a | b |\n|---|---|\n\n<b>tag</b> `code`",
         );
         assert_eq!(s, "Head See bold and the link or page tag code");
-        assert_eq!(plain("Claim [@arxiv:1]. Next"), "Claim. Next");
+        assert_eq!(plain("Claim [[arxiv--2410.24164]]. Next"), "Claim. Next");
+        assert_eq!(plain("See [[pi0|π0]] and [[jepa#Idea]]"), "See π0 and jepa");
     }
 
     #[test]

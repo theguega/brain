@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::contract::{self, Kind, Schema};
+use crate::doc::Taint;
 use crate::error::{Result, io};
 use crate::id::DocId;
-use crate::page;
+use crate::note;
 use crate::vault::Vault;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,21 +25,44 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
     let mut schemas: BTreeMap<&str, Schema> = BTreeMap::new();
     for name in entries(vault, "docs")? {
-        let file = Path::new("docs").join(&name).join("meta.json");
+        let file = Path::new("docs").join(&name).join(format!("{name}.md"));
         let mut finding = |error: String| {
             out.push(Finding {
                 file: file.clone(),
                 error,
             })
         };
+        let has_note = vault.path(&file).is_file();
+        for old in ["meta.json", "text.md"] {
+            if vault
+                .path(&Path::new("docs").join(&name).join(old))
+                .exists()
+            {
+                finding(if has_note {
+                    format!(
+                        "{old} beside the note: brain migrate-paperdb finishes a fold it \
+                         matches; if it does not, an older brain wrote it: merge what you \
+                         want into {name}.md and delete {old}"
+                    )
+                } else {
+                    format!(
+                        "{old} is the old layout: run brain migrate-paperdb to fold it into the note"
+                    )
+                });
+            }
+        }
         let Some(raw) = vault.read(&file)? else {
-            finding("no meta.json".to_owned());
+            finding(format!("no {name}.md"));
             continue;
         };
-        let meta: Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(e) => {
-                finding(format!("not JSON: {e}"));
+        let meta = match note::split(&raw).map(|(yaml, _)| note::parse(yaml)) {
+            Some(Ok(fm)) => Value::Object(fm),
+            Some(Err((line, why))) => {
+                finding(format!("line {}: {why}", line + 1));
+                continue;
+            }
+            None => {
+                finding("no frontmatter".to_owned());
                 continue;
             }
         };
@@ -68,6 +92,19 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
         for p in schema.problems(&meta) {
             finding(p.to_string());
         }
+        // Set by brain from the kind and id; an edit would unfence external text (B5).
+        if let Some(id) = &dir_id {
+            let want = Taint::of(kind, id);
+            if serde_json::to_value(want).ok().as_ref() != meta.get("taint") {
+                finding(format!(
+                    "taint must be {} for a {kind}",
+                    serde_json::to_value(want)
+                        .unwrap_or_default()
+                        .as_str()
+                        .unwrap_or_default()
+                ));
+            }
+        }
     }
 
     let pages = Schema::compile("page", contract::PAGE)?;
@@ -83,11 +120,11 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
             })
         };
         let text = vault.read(&file)?.unwrap_or_default();
-        let Some((yaml, _)) = page::split(&text) else {
+        let Some((yaml, _)) = note::split(&text) else {
             finding("no frontmatter".to_owned());
             continue;
         };
-        match page::parse_yaml(yaml) {
+        match note::parse(yaml) {
             Ok(fm) => {
                 for p in pages.problems(&Value::Object(fm)) {
                     finding(p.to_string());

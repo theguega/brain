@@ -76,8 +76,10 @@ impl Env {
         fs::read_to_string(self.vault().join(rel)).unwrap()
     }
 
+    /// The doc's note frontmatter, as JSON.
     fn meta(&self, dir: &str) -> Value {
-        serde_json::from_str(&self.read(&format!("docs/{dir}/meta.json"))).unwrap()
+        let text = self.read(&format!("docs/{dir}/{dir}.md"));
+        Value::Object(brain::note::parse(brain::note::split(&text).unwrap().0).unwrap())
     }
 
     fn git(&self, args: &[&str]) -> String {
@@ -148,17 +150,20 @@ impl Drop for Env {
     }
 }
 
-const PI0: &str = r#"{
-  "id": "arxiv:2410.24164",
-  "kind": "paper",
-  "taint": "external",
-  "added": "2026-10-27T10:00:00+09:00",
-  "title": "π0",
-  "authors": ["Kevin Black"],
-  "date": "2024-10-31",
-  "links": {}
-}
-"#;
+const PI0: &str = "---
+id: arxiv:2410.24164
+kind: paper
+taint: external
+added: \"2026-10-27T10:00:00+09:00\"
+title: π0
+authors:
+- Kevin Black
+date: \"2024-10-31\"
+links: {}
+---
+# π0
+";
+const PI0_NOTE: &str = "vault/docs/arxiv--2410.24164/arxiv--2410.24164.md";
 
 #[test]
 fn bare_brain_creates_a_local_vault_with_no_remote() {
@@ -179,8 +184,7 @@ fn bare_brain_creates_a_local_vault_with_no_remote() {
 fn adding_the_same_arxiv_id_twice_changes_nothing() {
     let env = Env::new(None);
     env.ok(&[]);
-    env.write("vault/docs/arxiv--2410.24164/meta.json", PI0);
-    env.write("vault/docs/arxiv--2410.24164/text.md", "# π0\n");
+    env.write(PI0_NOTE, PI0);
     env.git(&["add", "-A"]);
     env.git(&["-c", "commit.gpgsign=false", "commit", "-qm", "seed"]);
     for input in [
@@ -194,7 +198,7 @@ fn adding_the_same_arxiv_id_twice_changes_nothing() {
             "id: arxiv:2410.24164\nnoop: already in the vault\nmissing: none\nhelp: brain get arxiv:2410.24164\n"
         );
     }
-    assert_eq!(env.read("docs/arxiv--2410.24164/meta.json"), PI0);
+    assert_eq!(env.read("docs/arxiv--2410.24164/arxiv--2410.24164.md"), PI0);
     assert_eq!(env.git(&["status", "--porcelain"]), "");
     assert!(
         !env.vault().join(".git/brain-commit-pending").exists(),
@@ -207,16 +211,13 @@ fn lint_names_a_missing_required_field_and_exits_1() {
     let env = Env::new(None);
     env.ok(&[]);
     assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
-    env.write(
-        "vault/docs/arxiv--2410.24164/meta.json",
-        &PI0.replace("  \"authors\": [\"Kevin Black\"],\n", ""),
-    );
+    env.write(PI0_NOTE, &PI0.replace("authors:\n- Kevin Black\n", ""));
     env.write("vault/pages/jepa.md", "---\nkind: concept\ntitle: JEPA\nstatus: active\nsources: []\nupdated: 2026-10-27\n---\n# JEPA\n");
     let out = env.run(&["lint"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "errors[2/2]{file,error}:\n  docs/arxiv--2410.24164/meta.json,missing required authors\n  pages/jepa.md,missing required summary\n"
+        "errors[2/2]{file,error}:\n  docs/arxiv--2410.24164/arxiv--2410.24164.md,missing required authors\n  pages/jepa.md,missing required summary\n"
     );
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.starts_with("error: 2 lint errors\nnext: "), "{err}");
@@ -227,7 +228,7 @@ fn lint_names_a_missing_required_field_and_exits_1() {
             .lines()
             .next()
             .unwrap(),
-        r#"{"error":"missing required authors","file":"docs/arxiv--2410.24164/meta.json"}"#
+        r#"{"error":"missing required authors","file":"docs/arxiv--2410.24164/arxiv--2410.24164.md"}"#
     );
 }
 
@@ -366,7 +367,7 @@ fn add_artifact_keeps_the_page_and_its_why() {
             .contains("C1..C16")
     );
     assert!(
-        !env.read("docs/artifact--contracts-review/meta.json")
+        !env.read("docs/artifact--contracts-review/artifact--contracts-review.md")
             .contains(env.dir.to_str().unwrap()),
         "B16"
     );
@@ -379,7 +380,7 @@ fn add_artifact_keeps_the_page_and_its_why() {
     let out = env.ok(&["add", bare.to_str().unwrap()]);
     assert_eq!(
         out,
-        "id: artifact:other-page\nmissing: why\nhelp: fill them in docs/artifact--other-page/meta.json, then run brain lint\n"
+        "id: artifact:other-page\nmissing: why\nhelp: fill them in docs/artifact--other-page/artifact--other-page.md, then run brain lint\n"
     );
     assert_eq!(env.run(&["lint"]).status.code(), Some(1));
 }
@@ -496,14 +497,17 @@ fn add_meeting_reads_its_frontmatter() {
     assert!(out.contains("missing: none"), "{out}");
     let dir = id.replace(':', "--");
     let meta = env.meta(&dir);
-    assert_eq!(meta["attendees"], serde_json::json!(["alice", "bob"]));
-    assert_eq!(meta["project"], "brain");
+    assert_eq!(
+        meta["attendees"],
+        serde_json::json!(["[[alice]]", "[[bob]]"])
+    );
+    assert_eq!(meta["project"], "[[brain]]");
     assert_eq!(meta["tz"], "Europe/Paris");
     assert_eq!(meta["place"], "Paris");
     assert_eq!(meta["taint"], "own");
-    assert_eq!(
-        env.read(&format!("docs/{dir}/text.md")),
-        "# Weekly sync\n\n- ship core\n"
+    assert!(
+        env.read(&format!("docs/{dir}/{dir}.md"))
+            .ends_with("\n---\n# Weekly sync\n\n- ship core\n")
     );
     assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
 }
@@ -531,7 +535,7 @@ fn add_note_from_a_file_is_content_addressed() {
 fn label_appends_c7_and_like_adds() {
     let env = Env::new(Some(("Asia/Tokyo", "Tokyo")));
     env.ok(&[]);
-    env.write("vault/docs/arxiv--2410.24164/meta.json", PI0);
+    env.write(PI0_NOTE, PI0);
     assert_eq!(
         env.ok(&["label", "https://arxiv.org/abs/2410.24164", "like"]),
         "id: arxiv:2410.24164\nverdict: like\n"
@@ -574,7 +578,7 @@ fn link_edits_frontmatter_once() {
         env.read("pages/vla.md"),
         page.replace(
             "---\n# VLA",
-            "links:\n  - builds_on: arxiv:2410.24164\n  - related: jepa\n---\n# VLA"
+            "builds_on:\n  - \"[[arxiv--2410.24164]]\"\nrelated:\n  - \"[[jepa]]\"\n---\n# VLA"
         )
     );
     assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
@@ -620,28 +624,32 @@ fn add_pi0_from_the_network() {
             .unwrap()
             .starts_with("https://")
     );
-    let pi05 = serde_json::json!({"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"});
     assert!(
-        meta["lineage"].as_array().unwrap().contains(&pi05),
+        meta["builds_on"]
+            .as_array()
+            .unwrap()
+            .contains(&"[[arxiv--2504.16054]]".into()),
         "{meta}"
     );
     assert_eq!(meta["taint"], "external");
-    assert!(env.vault().join("docs/arxiv--2410.24164/text.md").is_file());
+    let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";
+    let before = env.read(note);
+    assert!(!brain::note::split(&before).unwrap().1.trim().is_empty());
     env.settle();
-    let before = env.read("docs/arxiv--2410.24164/meta.json");
     let head = env.git(&["rev-parse", "HEAD"]);
     let again = env.ok(&["add", "2410.24164"]);
     println!("{again}");
     assert!(again.contains("noop: already in the vault"));
-    assert_eq!(env.read("docs/arxiv--2410.24164/meta.json"), before);
+    assert_eq!(env.read(note), before);
     env.settle();
     assert_eq!(env.git(&["rev-parse", "HEAD"]), head);
 
-    fs::remove_file(env.vault().join("docs/arxiv--2410.24164/text.md")).unwrap();
+    let (yaml, _) = brain::note::split(&before).unwrap();
+    fs::write(env.vault().join(note), format!("---\n{yaml}---\n")).unwrap();
     let retried = env.ok(&["add", "2410.24164"]);
     println!("{retried}");
     assert!(retried.contains("\ntext: added\n"), "{retried}");
-    assert!(env.vault().join("docs/arxiv--2410.24164/text.md").is_file());
+    assert_eq!(env.read(note), before);
     assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
 }
 
@@ -707,7 +715,7 @@ fn a_command_that_fails_after_writing_still_commits() {
     env.settle();
     let files = env.git(&["show", "--name-only", "--format=%s", "HEAD"]);
     assert!(
-        files.starts_with("brain: autosave\n") && files.contains("/meta.json"),
+        files.starts_with("brain: autosave\n") && files.contains("/file--"),
         "{files}"
     );
 }
@@ -781,7 +789,7 @@ fn crlf_pages_lint_and_link_in_place() {
         env.read("pages/vla.md"),
         page.replace(
             "---\r\n# VLA",
-            "links:\r\n  - related: jepa\r\n---\r\n# VLA"
+            "related:\r\n  - \"[[jepa]]\"\r\n---\r\n# VLA"
         )
     );
     env.write("vault/pages/open.md", "---\ntitle: x\n");
@@ -821,7 +829,7 @@ fn log_headings_cannot_be_forged() {
 fn a_paper_without_text_retries_it_on_the_next_add() {
     let env = Env::new(None);
     env.ok(&[]);
-    env.write("vault/docs/arxiv--2410.24164/meta.json", PI0);
+    env.write(PI0_NOTE, &PI0.replace("# π0\n", ""));
     // Offline: the retry is attempted, fails, and says so.
     let out = env
         .cmd("1")
@@ -852,5 +860,49 @@ fn skip_and_later_take_urls_like_like_does() {
     assert_eq!(
         env.ok(&["label", "https://arxiv.org/abs/2410.24164v2", "skip"]),
         "id: arxiv:2410.24164\nverdict: skip\n"
+    );
+}
+
+#[test]
+fn link_writes_yaml_that_lints_whatever_form_the_key_had() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    let fm =
+        "kind: project\ntitle: X\nsummary: x\nstatus: active\nsources: []\nupdated: 2026-10-27\n";
+    // Column-0 items, as serde-saphyr writes them; the flow form `wiki propose --help` shows.
+    env.write(
+        "vault/pages/col0.md",
+        &format!("---\n{fm}project:\n- \"[[a]]\"\n---\nb\n"),
+    );
+    env.write(
+        "vault/pages/flow.md",
+        &format!("---\n{fm}builds_on: [\"[[a]]\"]\n---\nb\n"),
+    );
+    env.write(
+        "vault/pages/a.md",
+        &format!("---\n{fm}---\nSee [[col0]], [[flow]], [[beta]].\n"),
+    );
+    env.write(
+        "vault/pages/beta.md",
+        &format!("---\n{fm}---\nSee [[a]].\n"),
+    );
+    env.ok(&["link", "col0", "brain", "project"]);
+    env.ok(&["link", "flow", "beta", "builds_on"]);
+    env.ok(&["link", "a", "beta", "superseded_by"]);
+    assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
+    assert!(
+        env.read("pages/col0.md")
+            .contains("project:\n  - \"[[a]]\"\n  - \"[[brain]]\"\n---")
+    );
+    assert!(
+        env.read("pages/a.md")
+            .contains("superseded_by: \"[[beta]]\"\n")
+    );
+    let out = env.run(&["link", "a", "col0", "superseded_by"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("holds one link and is already [[beta]]")
     );
 }

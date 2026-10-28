@@ -3,7 +3,7 @@
   "$id": "https://brain.local/contracts/kinds/talk.schema.json",
   "version": 1,
   "title": "C1 doc: talk",
-  "description": "A talk or lecture. Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
+  "description": "A talk or lecture. Stored as the YAML frontmatter of docs/<dir>/<dir>.md, whose body is the text; <dir> is the id with ':' replaced by '--'.",
   "type": "object",
   "properties": {
     "id": {
@@ -44,6 +44,14 @@
     "title": {
       "type": "string",
       "minLength": 1
+    },
+    "aliases": {
+      "description": "The title and short handles (π0), so a [[wikilink]] by any of them resolves in Obsidian.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "speakers": {
       "type": "array",

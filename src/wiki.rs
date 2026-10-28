@@ -10,7 +10,8 @@
 //! ```
 //!
 //! Text before the first header is ignored. A question travels in the proposal's commit as
-//! a `Brain-Question:` trailer, and a merge appends it to `eval/questions.jsonl`.
+//! a `Brain-Question:` trailer, and a merge appends it to `eval/questions.jsonl`. A page
+//! cites a doc as `[[<doc dir>]]` or `[[<doc dir>#<heading>]]` (see [`check`]).
 
 pub mod check;
 
@@ -22,6 +23,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::doc;
 use crate::embed::Embedder;
 use crate::error::{Error, Result, io};
 use crate::id::{DocId, Slug};
@@ -646,11 +648,11 @@ pub fn queue(vault: &Vault) -> Result<Vec<Queued>> {
         if done.contains(&id) {
             continue;
         }
-        let Some(raw) = vault.read(&Vault::doc_dir(&id).join("meta.json"))? else {
+        if !vault.has_doc(&id) {
             continue;
-        };
-        // An unreadable meta.json is lint's to report; it is still marked.
-        let meta: Value = serde_json::from_str(&raw).unwrap_or_default();
+        }
+        // An unreadable note is lint's to report; it is still marked.
+        let meta = doc::read(vault, &id).ok().flatten().unwrap_or_default().0;
         let get = |k: &str| {
             meta.get(k)
                 .and_then(Value::as_str)

@@ -1,10 +1,14 @@
 //! `brain lint`, wiki part (B18): deterministic checks on `pages/*.md` beyond the schema.
 //!
-//! Errors: dead `[[wikilinks]]` and `[@<doc-id>#<span>]` citations, uncited paragraphs and
-//! list items in concept and synthesis pages outside `## Open questions`, cited ids missing
-//! from `sources[]`, pages over [`MAX_TOKENS`]. A missing or long `summary` is the schema's.
-//! Warnings: orphans, contradictions open over [`CONTRADICTION_DAYS`], active pages not
-//! updated in [`STALE_DAYS`], frontmatter keys C2 does not name.
+//! A wikilink resolves as Obsidian does (see [`Names`]): a doc's directory name, a page's
+//! slug, then an alias. One that names a doc, `[[arxiv--2410.24164#Method]]` or
+//! `[[π0#Method]]`, is a citation; an alias two notes hold is an error naming both.
+//!
+//! Errors: dead wikilinks and citations, uncited paragraphs and list items in concept and
+//! synthesis pages outside `## Open questions`, cited ids missing from `sources[]`, pages
+//! over [`MAX_TOKENS`]. A missing or long `summary` is the schema's. Warnings: orphans,
+//! contradictions open over [`CONTRADICTION_DAYS`], active pages not updated in
+//! [`STALE_DAYS`], frontmatter keys C2 does not name and that are not relations.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,9 +20,9 @@ use crate::chunk;
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::id::DocId;
-use crate::index::{doc_spans, wikilinks};
+use crate::index::{self, doc_spans};
 use crate::lint::{self, Finding};
-use crate::page;
+use crate::note::{self, Names, Resolved, Target};
 use crate::search::norm;
 use crate::vault::{Vault, git};
 
@@ -51,8 +55,8 @@ pub fn check(vault: &Vault) -> Result<Checked> {
         let file = Path::new("pages").join(&name);
         let raw = vault.read(&file)?.unwrap_or_default();
         // A page whose frontmatter does not parse is the schema check's to report.
-        let Some((fm, body_at)) = page::split(&raw)
-            .and_then(|(yaml, body)| Some((page::parse_yaml(yaml).ok()?, raw.len() - body.len())))
+        let Some((fm, body_at)) = note::split(&raw)
+            .and_then(|(yaml, body)| Some((note::parse(yaml).ok()?, raw.len() - body.len())))
         else {
             continue;
         };
@@ -71,7 +75,7 @@ pub fn check(vault: &Vault) -> Result<Checked> {
         source,
     })?;
     let known = schema.get("properties").and_then(Value::as_object);
-    let slugs: BTreeSet<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
+    let names = index::names(vault)?;
     let mut inbound: BTreeSet<String> = BTreeSet::new();
     let mut out = Checked::default();
     let mut spans: BTreeMap<DocId, Vec<String>> = BTreeMap::new();
@@ -86,8 +90,8 @@ pub fn check(vault: &Vault) -> Result<Checked> {
                 error: line.map_or(why.clone(), |l| format!("line {l}: {why}")),
             });
         };
-        for key in p.fm.keys() {
-            if !known.is_some_and(|k| k.contains_key(key)) {
+        for (key, v) in &p.fm {
+            if !known.is_some_and(|k| k.contains_key(key)) && !note::is_relation(v) {
                 out.warnings.push(Finding {
                     file: p.file.clone(),
                     error: format!("unknown frontmatter key `{key}`"),
@@ -112,52 +116,49 @@ pub fn check(vault: &Vault) -> Result<Checked> {
             p.fm.get("kind").and_then(Value::as_str),
             Some("concept" | "synthesis")
         );
-        for link in
-            p.fm.get("links")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-        {
-            if let Some(dst) = link.as_object().and_then(|o| o.values().next()?.as_str()) {
-                inbound_from(&mut inbound, &p.slug, dst);
-            }
+        for (dst, _) in note::relations(&p.fm, &names) {
+            inbound_from(&mut inbound, &p.slug, &dst);
         }
 
         let body = p.raw.lines().skip(p.first - 1);
         let mut unsourced: BTreeSet<DocId> = BTreeSet::new();
         let mut blocks = Blocks::default();
         for (n, line) in (p.first..).zip(body) {
-            if !blocks.line(n, line) {
+            if !blocks.line(n, line, &names) {
                 continue;
             }
-            for target in wikilinks(line) {
-                let target = target.as_str();
-                inbound_from(&mut inbound, &p.slug, target);
-                if !slugs.contains(target) && !is_doc(vault, target) {
-                    error(Some(n), format!("dead link [[{target}]]"));
-                }
-            }
-            for cite in citations(line) {
-                let (id, span) = cite
-                    .split_once('#')
-                    .map_or((cite, None), |(i, s)| (i, Some(s)));
-                match DocId::parse(id) {
-                    Ok(id) if !vault.has_doc(&id) => {
-                        error(Some(n), format!("dead citation [@{cite}]"));
+            for link in note::links(line) {
+                let shown = match link.heading {
+                    Some(h) => format!("[[{}#{h}]]", link.target),
+                    None => format!("[[{}]]", link.target),
+                };
+                let id = match names.resolve(link.target) {
+                    Resolved::Found(Target::Doc(id)) => id,
+                    Resolved::Found(Target::Page(slug)) => {
+                        inbound_from(&mut inbound, &p.slug, &slug);
+                        continue;
                     }
-                    Ok(id)
-                        if let Some(span) = span
-                            && !has_span(vault, &mut spans, &id, span) =>
-                    {
-                        error(Some(n), format!("dead citation [@{cite}]: no such span"));
+                    Resolved::Ambiguous(held) => {
+                        let held: Vec<String> = held.iter().map(Target::dst).collect();
+                        error(
+                            Some(n),
+                            format!("ambiguous {shown}: an alias of {}", held.join(" and ")),
+                        );
+                        continue;
                     }
-                    Ok(id) if !sources.contains(&id) => {
-                        if unsourced.insert(id.clone()) {
-                            error(Some(n), format!("{id} is cited but not in sources[]"));
-                        }
+                    Resolved::Unknown => {
+                        error(Some(n), format!("dead link {shown}"));
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(_) => error(Some(n), format!("dead citation [@{cite}]: not a doc id")),
+                };
+                if !vault.has_doc(&id) {
+                    error(Some(n), format!("dead citation {shown}"));
+                } else if let Some(span) = link.heading
+                    && !has_span(vault, &mut spans, &id, span)
+                {
+                    error(Some(n), format!("dead citation {shown}: no such span"));
+                } else if !sources.contains(&id) && unsourced.insert(id.clone()) {
+                    error(Some(n), format!("{id} is cited but not in sources[]"));
                 }
             }
             if line.trim_start().starts_with("> [!contradiction]") {
@@ -174,7 +175,7 @@ pub fn check(vault: &Vault) -> Result<Checked> {
             for n in blocks.finish() {
                 error(
                     Some(n),
-                    "uncited paragraph: cite a doc as [@<doc-id>]".to_owned(),
+                    "uncited paragraph: cite a doc as [[<doc-id>]]".to_owned(),
                 );
             }
         }
@@ -206,10 +207,6 @@ fn inbound_from(inbound: &mut BTreeSet<String>, src: &str, dst: &str) {
     if dst != src {
         inbound.insert(dst.to_owned());
     }
-}
-
-fn is_doc(vault: &Vault, target: &str) -> bool {
-    DocId::parse(target).is_ok_and(|id| vault.has_doc(&id))
 }
 
 /// Whether `brain get <id>#<span>` would find the span: a chunk number or a heading.
@@ -263,7 +260,7 @@ struct Block {
 
 impl Blocks {
     /// Feeds one line; `false` when it is not prose (code, math, a comment).
-    fn line(&mut self, n: usize, line: &str) -> bool {
+    fn line(&mut self, n: usize, line: &str, names: &Names) -> bool {
         match &self.raw {
             Some(Raw::Fence(c, len)) => {
                 let t = line.trim();
@@ -334,7 +331,7 @@ impl Blocks {
         if is_item(t) {
             self.flush();
         }
-        let cited = !citations(t).is_empty();
+        let cited = note::links(t).iter().any(|l| names.doc(l).is_some());
         let claims = has_words(t);
         let b = self.cur.get_or_insert(Block {
             line: n,
@@ -403,7 +400,7 @@ fn fence(t: &str) -> Option<Raw> {
 /// Whether a line holds words once list markers, links, images and citations are gone.
 fn has_words(t: &str) -> bool {
     let t = item_text(t);
-    let t = strip(&strip(&strip(t, "![", ")"), "[[", "]]"), "[@", "]");
+    let t = strip(&strip(t, "![", ")"), "[[", "]]");
     t.chars().any(char::is_alphanumeric)
 }
 
@@ -453,23 +450,6 @@ fn item_text(t: &str) -> &str {
         .unwrap_or(t)
 }
 
-/// `[@<doc-id>]` or `[@<doc-id>#<span>]`, as `<doc-id>[#<span>]`.
-fn citations(line: &str) -> Vec<&str> {
-    between(line, "[@", "]").map(str::trim).collect()
-}
-
-fn between<'a>(line: &'a str, open: &'a str, close: &'a str) -> impl Iterator<Item = &'a str> {
-    let mut rest = line;
-    std::iter::from_fn(move || {
-        let i = rest.find(open)?;
-        rest = rest.get(i + open.len()..)?;
-        let end = rest.find(close)?;
-        let inner = rest.get(..end)?;
-        rest = rest.get(end + close.len()..)?;
-        Some(inner)
-    })
-}
-
 /// When the line was last committed, in Unix seconds; `None` before its first commit.
 fn committed_at(vault: &Vault, file: &Path, line: usize) -> Option<u64> {
     let range = format!("{line},{line}");
@@ -510,14 +490,14 @@ mod tests {
     fn uncited(body: &str) -> Vec<usize> {
         let mut b = Blocks::default();
         for (n, l) in (1..).zip(body.lines()) {
-            b.line(n, l);
+            b.line(n, l, &Names::default());
         }
         b.finish()
     }
 
     #[test]
     fn every_paragraph_and_item_outside_open_questions_cites() {
-        let body = "# Pi0\n\nA flow policy [@arxiv:2410.24164].\nIt chunks.\n\nUncited claim.\n\n- cited [@arxiv:2410.24164]\n- uncited\n\n```\ncode\n```\n\n## Open questions\n\nWhy?\n\n### Sub\n\nStill open.\n\n## Next\n\nNot exempt.\n";
+        let body = "# Pi0\n\nA flow policy [[arxiv--2410.24164]].\nIt chunks.\n\nUncited claim.\n\n- cited [[arxiv--2410.24164#Method]]\n- uncited [[pi0]]\n\n```\ncode\n```\n\n## Open questions\n\nWhy?\n\n### Sub\n\nStill open.\n\n## Next\n\nNot exempt.\n";
         assert_eq!(uncited(body), [6, 9, 25]);
     }
 
@@ -525,14 +505,6 @@ mod tests {
     fn code_math_comments_and_link_only_blocks_are_not_claims() {
         let body = "````\n```\nnot closed by three\n````\n\n- [[pi0]]\n- [[jepa|JEPA]], ![fig](x.png)\n\n    indented code\n\n<!-- a note\nstill a note -->\n\n$$\nx = y\n$$\n\n$$ a = b $$\n\n## Open questions:\n\nWhy?\n\n## After\n\n- real claim\n";
         assert_eq!(uncited(body), [26]);
-    }
-
-    #[test]
-    fn citations_parse() {
-        assert_eq!(
-            citations("x [@arxiv:2410.24164#2] y [@web:a-b]"),
-            ["arxiv:2410.24164#2", "web:a-b"]
-        );
     }
 
     #[test]

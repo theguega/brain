@@ -284,16 +284,25 @@ fn fixture(dir: &Path) -> Fixture {
     }
 }
 
-/// PwC: π0 has lineage, FAST is unknown (404).
+fn related(ids: &[&str]) -> Option<Vec<Related>> {
+    Some(
+        ids.iter()
+            .map(|i| Related {
+                arxiv_id: Some((*i).to_owned()),
+            })
+            .collect(),
+    )
+}
+
+/// PwC: π0 builds on PaliGemma (not in the vault); π0.5 (not in the vault) and FAST build
+/// on π0. FAST is unknown (404).
 fn pwc_stub(id: &ArxivId) -> Result<Option<pwc::Paper>> {
     Ok((id.as_str() == "2410.24164").then(|| pwc::Paper {
         arxiv_id: Some("2410.24164".to_owned()),
         tldr: Some("Flow matching on a VLM.".to_owned()),
         conference_name: Some("RSS".to_owned()),
-        predecessor_papers: Some(vec![]),
-        successor_papers: Some(vec![Related {
-            arxiv_id: Some("2504.16054".to_owned()),
-        }]),
+        predecessor_papers: related(&["2407.07726"]),
+        successor_papers: related(&["2504.16054", "2501.09747"]),
     }))
 }
 
@@ -322,9 +331,19 @@ const NET: Lookups<'static> = Lookups {
     hal: &hal_stub,
 };
 
+/// The note of `docs/<dir>`: its frontmatter and body.
+fn note(v: &Vault, dir: &str) -> (Value, String) {
+    let name = Path::new(dir).file_name().unwrap().to_string_lossy();
+    let text = fs::read_to_string(v.path(Path::new(dir)).join(format!("{name}.md"))).unwrap();
+    let (yaml, body) = brain::note::split(&text).unwrap();
+    (
+        Value::Object(brain::note::parse(yaml).unwrap()),
+        body.to_owned(),
+    )
+}
+
 fn meta(v: &Vault, dir: &str) -> Value {
-    serde_json::from_str(&fs::read_to_string(v.path(Path::new(dir)).join("meta.json")).unwrap())
-        .unwrap()
+    note(v, dir).0
 }
 
 /// Every file under `root` but `.git`, by relative path.
@@ -415,12 +434,14 @@ fn migrates_papers_journal_readings_and_skips() {
     assert_eq!(p["tldr"], "Flow matching on a VLM.");
     assert_eq!(p["venue"], "RSS");
     assert_eq!(
-        p["lineage"],
-        json!([{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}])
+        p["builds_on"],
+        json!(["[[arxiv--2407.07726]]"]),
+        "its predecessors only: a successor's edge is on the successor"
     );
+    assert_eq!(p["aliases"], json!([p["title"]]), "two keywords are topics");
     let pi0 = v.path(Path::new("docs/arxiv--2410.24164"));
     assert_eq!(
-        fs::read_to_string(pi0.join("text.md")).unwrap(),
+        note(&v, "docs/arxiv--2410.24164").1,
         "# π0\n\nAction expert.\n"
     );
     assert_eq!(
@@ -433,7 +454,7 @@ fn migrates_papers_journal_readings_and_skips() {
     );
 
     let fast = meta(&v, "docs/arxiv--2501.09747");
-    assert!(fast.get("lineage").is_none(), "a PwC 404 is no answer");
+    assert!(fast.get("builds_on").is_none(), "a PwC 404 is no answer");
     assert!(
         fast.get("keywords").is_none(),
         "FAST is already in the title"
@@ -560,7 +581,7 @@ fn migrates_papers_journal_readings_and_skips() {
             fs::read(d.join(format!("source.{ext}"))).unwrap(),
             fs::read(fx.readings.join(src)).unwrap()
         );
-        let text = fs::read_to_string(d.join("text.md")).unwrap();
+        let text = note(&v, &d.strip_prefix(v.root()).unwrap().to_string_lossy()).1;
         let want = match ext {
             "pdf" => "Hello reader",
             _ => "Alpha",
@@ -695,7 +716,7 @@ fn a_changed_source_is_reported_not_applied() {
     assert!(
         warned(
             &r,
-            "arxiv:2410.24164: papers/2410.24164 changed since it was migrated (text.md)"
+            "arxiv:2410.24164: papers/2410.24164 changed since it was migrated (text)"
         ),
         "{:?}",
         r.warnings
@@ -755,7 +776,11 @@ fn lineage_waits_for_papers_with_code_then_reindex_fills_it() {
     let r = migrate_paperdb::run(&v, &src, &fx.pdfs, &now(), down);
     assert_eq!((r.papers, r.lineage), (3, 0));
     assert!(warned(&r, "reindex will retry"));
-    assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());
+    assert!(
+        meta(&v, "docs/arxiv--2410.24164")
+            .get("builds_on")
+            .is_none()
+    );
 
     let index = dir.join("index.db");
     let tried = lineage::retry(&v, &index, 10, &pwc_down).unwrap();
@@ -773,12 +798,16 @@ fn lineage_waits_for_papers_with_code_then_reindex_fills_it() {
         "FAST is a 404: still pending"
     );
     let p = meta(&v, "docs/arxiv--2410.24164");
-    assert_eq!(p["lineage"][0]["src"], "arxiv:2504.16054");
+    assert_eq!(p["builds_on"], json!(["[[arxiv--2407.07726]]"]));
     assert_eq!(
         (&p["tldr"], &p["venue"]),
         (&json!("Flow matching on a VLM."), &json!("RSS"))
     );
-    assert!(meta(&v, "docs/arxiv--2501.09747").get("lineage").is_none());
+    assert!(
+        meta(&v, "docs/arxiv--2501.09747")
+            .get("builds_on")
+            .is_none()
+    );
 }
 
 #[test]
@@ -849,6 +878,256 @@ fn one_pwc_failure_costs_only_that_paper() {
     let r = migrate_paperdb::run(&v, &src, &fx.pdfs, &now(), net);
     assert_eq!(r.lineage, 1);
     assert!(warned(&r, "arxiv:2410.24164: papers with code"));
-    assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());
-    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["lineage"], json!([]));
+    assert!(
+        meta(&v, "docs/arxiv--2410.24164")
+            .get("builds_on")
+            .is_none()
+    );
+    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["builds_on"], json!([]));
+}
+
+#[test]
+fn a_successor_in_the_vault_gets_the_edge_on_its_own_note() {
+    let dir = tmp();
+    let fx = fixture(&dir);
+    let v = vault(&dir);
+    let fast_answered = |id: &ArxivId| -> Result<Option<pwc::Paper>> {
+        if id.as_str() == "2501.09747" {
+            return Ok(Some(pwc::Paper {
+                arxiv_id: Some("2501.09747".to_owned()),
+                ..pwc::Paper::default()
+            }));
+        }
+        pwc_stub(id)
+    };
+    let net = Lookups {
+        pwc: &fast_answered,
+        hal: &hal_stub,
+    };
+    migrate_paperdb::run(&v, &fx.sources(), &fx.pdfs, &now(), net);
+    // π0 was migrated before FAST was in the vault, and FAST's own record omits π0.
+    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["builds_on"], json!([]));
+    let pi0 = brain::DocId::parse("arxiv:2410.24164").unwrap();
+    let fast = brain::DocId::parse("arxiv:2501.09747").unwrap();
+    let pi05 = brain::DocId::parse("arxiv:2504.16054").unwrap();
+    let both = [pi05, fast];
+    assert_eq!(lineage::link_successors(&v, &pi0, &both).unwrap(), 1);
+    assert_eq!(
+        meta(&v, "docs/arxiv--2501.09747")["builds_on"],
+        json!(["[[arxiv--2410.24164]]"])
+    );
+    assert_eq!(lineage::link_successors(&v, &pi0, &both).unwrap(), 0);
+    assert!(!v.root().join("docs/arxiv--2504.16054").exists());
+
+    // A successor whose own PwC answer is pending keeps waiting for it.
+    let v2 = vault(&tmp());
+    let down = Lookups {
+        pwc: &pwc_down,
+        hal: &hal_stub,
+    };
+    migrate_paperdb::run(&v2, &fx.sources(), &fx.pdfs, &now(), down);
+    assert_eq!(lineage::link_successors(&v2, &pi0, &both).unwrap(), 0);
+    assert!(
+        meta(&v2, "docs/arxiv--2501.09747")
+            .get("builds_on")
+            .is_none()
+    );
+}
+
+#[test]
+fn an_old_layout_vault_is_folded_into_notes_keeping_every_value() {
+    let dir = tmp();
+    let v = vault(&dir);
+    let docs = v.root().join("docs");
+    let pi0 = json!({
+        "id": "arxiv:2410.24164", "kind": "paper", "taint": "external",
+        "added": "2026-10-02T12:00:00-07:00", "title": "$π_0$: A VLA", "authors": ["Kevin Black"],
+        "date": "2024-10-31", "links": {}, "keywords": ["π0"], "abstract": "Line one.\nLine two.",
+        "lineage": [{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}],
+    });
+    write(&docs.join("arxiv--2410.24164/meta.json"), pi0.to_string());
+    let pi05 = json!({
+        "id": "arxiv:2504.16054", "kind": "paper", "taint": "external",
+        "added": "2026-10-02T12:00:00-07:00", "title": "$π_{0.5}$", "authors": ["A"],
+        "date": "2025-04-22", "links": {}, "lineage": [],
+    });
+    write(&docs.join("arxiv--2504.16054/meta.json"), pi05.to_string());
+    write(&docs.join("arxiv--2410.24164/text.md"), "---\n# π0\n");
+    let fast = json!({
+        "id": "arxiv:2501.09747", "kind": "paper", "taint": "external",
+        "added": "2026-10-02T12:00:00-07:00", "title": "FAST", "authors": ["A"],
+        "date": "2025-01-16", "links": {}, "lineage": [],
+    });
+    write(&docs.join("arxiv--2501.09747/meta.json"), fast.to_string());
+    let sync = json!({
+        "id": "meeting:2026-10-27-sync", "kind": "meeting", "taint": "own",
+        "added": "2026-10-27T10:00:00+09:00", "title": "Sync", "started_at": "2026-10-27T10:00:00+09:00",
+        "tz": "Asia/Tokyo", "place": "Tokyo", "attendees": ["alice", "[[bob]]"], "project": "brain",
+    });
+    write(
+        &docs.join("meeting--2026-10-27-sync/meta.json"),
+        sync.to_string(),
+    );
+    write(&docs.join("meeting--2026-10-27-sync/text.md"), "- ship\n");
+    let course = json!({
+        "id": "artifact:legged", "kind": "artifact", "taint": "external",
+        "added": "2026-10-28T08:36:56-07:00", "why": "study map", "source": "legged.html",
+        "title": "Legged", "captured_at": "2026-10-18T13:54:57-07:00",
+    });
+    write(&docs.join("artifact--legged/meta.json"), course.to_string());
+    write(&docs.join("artifact--legged/index.html"), "<p>LQR</p>");
+    let papers = dir.join("papers");
+    fs::create_dir_all(papers.join("papers")).unwrap();
+    let src = Sources {
+        papers: &papers,
+        journal: None,
+        readings: None,
+    };
+
+    let r = migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    assert_eq!(r.converted, 5, "{r:#?}");
+    assert!(r.failed.is_empty(), "{r:#?}");
+    let (p, body) = note(&v, "docs/arxiv--2410.24164");
+    let mut want = pi0.clone();
+    let w = want.as_object_mut().unwrap();
+    w.remove("lineage");
+    w.insert("builds_on".into(), json!([]));
+    w.insert("aliases".into(), json!(["$π_0$: A VLA", "π0"]));
+    assert_eq!(p, want);
+    assert_eq!(body, "---\n# π0\n");
+    // The edge was stored in π0's meta only; it lands on π0.5, the paper that builds on π0.
+    assert_eq!(
+        meta(&v, "docs/arxiv--2504.16054")["builds_on"],
+        json!(["[[arxiv--2410.24164]]"])
+    );
+    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["builds_on"], json!([]));
+    let (m, body) = note(&v, "docs/meeting--2026-10-27-sync");
+    assert_eq!(m["attendees"], json!(["[[alice]]", "[[bob]]"]));
+    assert_eq!(m["project"], "[[brain]]");
+    assert_eq!(body, "- ship\n");
+    let (a, body) = note(&v, "docs/artifact--legged");
+    assert_eq!(a["why"], "study map");
+    assert_eq!(body, "");
+    assert!(docs.join("artifact--legged/index.html").is_file());
+    for d in fs::read_dir(&docs).unwrap() {
+        let d = d.unwrap().path();
+        assert!(!d.join("meta.json").exists() && !d.join("text.md").exists());
+    }
+    assert!(brain::lint::lint(&v).unwrap().is_empty());
+
+    let before = snapshot(v.root());
+    let again = migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    assert_eq!(again.converted, 0);
+    assert_eq!(snapshot(v.root()), before);
+}
+
+/// π0 and π0.5 in the older layout, the π0.5 builds_on π0 edge stored in π0's meta only.
+fn old_pair(docs: &Path) {
+    let paper = |id: &str, title: &str, lineage: Value| {
+        json!({
+            "id": id, "kind": "paper", "taint": "external", "added": "2026-10-02T12:00:00-07:00",
+            "title": title, "authors": ["A"], "date": "2024-10-31", "links": {}, "lineage": lineage,
+        })
+    };
+    let edge = json!([{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}]);
+    write(
+        &docs.join("arxiv--2410.24164/meta.json"),
+        paper("arxiv:2410.24164", "π0", edge).to_string(),
+    );
+    write(&docs.join("arxiv--2410.24164/text.md"), "# π0\n");
+    write(
+        &docs.join("arxiv--2504.16054/meta.json"),
+        paper("arxiv:2504.16054", "π0.5", json!([])).to_string(),
+    );
+    write(&docs.join("arxiv--2504.16054/text.md"), "# π0.5\n");
+}
+
+#[test]
+fn a_rerun_finishes_a_fold_cut_short_anywhere() {
+    let dir = tmp();
+    let v = vault(&dir);
+    let docs = v.root().join("docs");
+    let papers = dir.join("papers");
+    fs::create_dir_all(papers.join("papers")).unwrap();
+    let src = Sources {
+        papers: &papers,
+        journal: None,
+        readings: None,
+    };
+    let run = || migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    let pi05 = "docs/arxiv--2504.16054";
+    let note05 = docs.join("arxiv--2504.16054/arxiv--2504.16054.md");
+    let want = json!(["[[arxiv--2410.24164]]"]);
+
+    // Cut in the first pass: π0's note is written, π0.5's is not, every old file is there.
+    old_pair(&docs);
+    run();
+    fs::remove_file(&note05).unwrap();
+    old_pair(&docs);
+    let r = run();
+    assert_eq!((r.converted, r.failed.len()), (1, 0), "{r:#?}");
+    assert_eq!(meta(&v, pi05)["builds_on"], want);
+
+    // Cut in the second pass: π0's meta.json is gone, the edge it held is not lost.
+    let done = snapshot(v.root());
+    old_pair(&docs);
+    fs::remove_file(docs.join("arxiv--2410.24164/meta.json")).unwrap();
+    fs::remove_file(docs.join("arxiv--2410.24164/text.md")).unwrap();
+    let r = run();
+    assert_eq!((r.converted, r.warnings.len()), (0, 0), "{r:#?}");
+    assert_eq!(snapshot(v.root()), done);
+
+    // Cut between removing meta.json and text.md.
+    write(&docs.join("arxiv--2504.16054/text.md"), "# π0.5\n");
+    run();
+    assert_eq!(snapshot(v.root()), done);
+    assert!(brain::lint::lint(&v).unwrap().is_empty());
+}
+
+#[test]
+fn a_note_is_never_overwritten_by_old_files_beside_it() {
+    let dir = tmp();
+    let v = vault(&dir);
+    let docs = v.root().join("docs");
+    let papers = dir.join("papers");
+    fs::create_dir_all(papers.join("papers")).unwrap();
+    let src = Sources {
+        papers: &papers,
+        journal: None,
+        readings: None,
+    };
+    old_pair(&docs);
+    migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    let before = note(&v, "docs/arxiv--2410.24164");
+
+    // What an older brain's `add` writes beside the note: fresh metadata, new text.
+    let fresh = json!({
+        "id": "arxiv:2410.24164", "kind": "paper", "taint": "external",
+        "added": "2026-10-29T09:00:00-07:00", "title": "π0", "authors": ["A"],
+        "date": "2024-10-31", "links": {},
+    });
+    write(&docs.join("arxiv--2410.24164/meta.json"), fresh.to_string());
+    write(&docs.join("arxiv--2410.24164/text.md"), "# π0, refetched\n");
+    let r = migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
+    assert_eq!(r.converted, 0);
+    assert_eq!(note(&v, "docs/arxiv--2410.24164"), before);
+    assert!(warned(
+        &r,
+        "docs/arxiv--2410.24164: meta.json beside the note disagrees"
+    ));
+    assert!(warned(
+        &r,
+        "docs/arxiv--2410.24164: text.md beside the note disagrees"
+    ));
+    assert!(docs.join("arxiv--2410.24164/meta.json").is_file());
+    let errors: Vec<String> = brain::lint::lint(&v)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.error)
+        .collect();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(
+        errors[0].starts_with("meta.json beside the note"),
+        "{errors:?}"
+    );
 }

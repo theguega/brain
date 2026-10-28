@@ -23,6 +23,7 @@ pub mod log;
 pub mod migrate;
 pub mod migrate_paperdb;
 mod net;
+pub mod note;
 pub mod page;
 pub mod profile;
 pub mod pwc;

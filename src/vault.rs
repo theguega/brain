@@ -1,7 +1,7 @@
 //! The vault: `~/brain`, plain files in a local git repo with no remote (B11).
 //!
 //! ```text
-//! docs/<id>/meta.json   C1      pages/<slug>.md   C2      log/YYYY-MM-DD.md  C3
+//! docs/<dir>/<dir>.md   C1      pages/<slug>.md   C2      log/YYYY-MM-DD.md  C3
 //! labels.jsonl          C7      profile.md        C5
 //! ```
 //!
@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result, io};
@@ -97,7 +96,7 @@ impl Vault {
 
     #[must_use]
     pub fn has_doc(&self, id: &DocId) -> bool {
-        self.path(&Self::doc_dir(id).join("meta.json")).is_file()
+        self.path(&crate::doc::path(id)).is_file()
     }
 
     #[must_use]
@@ -133,16 +132,6 @@ impl Vault {
         write_atomic(&p, contents)
     }
 
-    /// Pretty JSON with a trailing newline, so git diffs stay line-based.
-    pub fn write_json<T: Serialize>(&self, rel: &Path, value: &T) -> Result<()> {
-        let mut s = serde_json::to_string_pretty(value).map_err(|source| Error::Json {
-            path: rel.to_owned(),
-            source,
-        })?;
-        s.push('\n');
-        self.write(rel, &s)
-    }
-
     /// Copies a file in, byte for byte, by the same temp-then-rename as every write.
     pub fn copy(&self, from: &Path, rel: &Path) -> Result<()> {
         let p = self.path(rel);
@@ -169,6 +158,16 @@ impl Vault {
         match f(self.read(rel)?)? {
             Some(new) => self.write(rel, &new).map(|()| true),
             None => Ok(false),
+        }
+    }
+
+    /// Deletes a file; one already gone is fine.
+    pub fn remove(&self, rel: &Path) -> Result<()> {
+        let p = self.path(rel);
+        self.dirty.set(true);
+        match fs::remove_file(&p) {
+            Err(e) if e.kind() != ErrorKind::NotFound => io(Err(e), &p),
+            _ => Ok(()),
         }
     }
 
@@ -384,14 +383,14 @@ mod tests {
     fn temp_names_differ_per_file() {
         let dir = std::env::temp_dir().join(format!("brain-atomic-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        write_atomic(&dir.join("meta.json"), "{}").unwrap();
-        write_atomic(&dir.join("text.md"), "# t").unwrap();
+        write_atomic(&dir.join("a.md"), "---\n---\n").unwrap();
+        write_atomic(&dir.join("index.html"), "<p>").unwrap();
         let mut names: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         names.sort();
-        assert_eq!(names, ["meta.json", "text.md"]);
+        assert_eq!(names, ["a.md", "index.html"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,14 +1,18 @@
-//! C1: `docs/<id>/meta.json`. The envelope is common to every kind; the body is the
-//! kind's required metadata (see `contracts/kinds/`).
+//! C1: `docs/<dir>/<dir>.md`, one note per doc. Its frontmatter is the envelope, common to
+//! every kind, plus the kind's required metadata (see `contracts/kinds/`); its body is the
+//! full text. Originals stay beside it: a book's `source.<ext>`, an artifact's `index.html`.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::contract::Kind;
 use crate::error::{Error, Result};
-use crate::id::{DocId, Rel, is_slug, string_newtype_impls};
+use crate::id::{DocId, is_slug, string_newtype_impls};
+use crate::note;
+use crate::vault::Vault;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Doc<B> {
@@ -87,10 +91,11 @@ pub struct Paper {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<String>,
-    /// Papers with Code predecessors and successors, in the library or not. `None` until
-    /// PwC answers, so a reindex knows to retry; `Some(vec![])` when it knows of none.
+    /// Papers with Code predecessors and successors as `[[<dir>]]` wikilinks, in the library
+    /// or not. `None` until PwC answers, so a reindex knows to retry; `Some(vec![])` when it
+    /// knows of none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<Vec<Edge>>,
+    pub builds_on: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<Card>,
 }
@@ -107,14 +112,6 @@ pub struct PaperLinks {
     pub openreview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video: Option<String>,
-}
-
-/// `src` `rel` `dst`, e.g. π0.5 builds_on π0.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Edge {
-    pub src: DocId,
-    pub dst: DocId,
-    pub rel: Rel,
 }
 
 /// blog and news.
@@ -141,15 +138,79 @@ pub struct Meeting {
     pub tz: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub place: Option<String>,
-    /// Page slugs.
+    /// `[[<page slug>]]` wikilinks.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attendees: Vec<String>,
+    /// A `[[<page slug>]]` wikilink.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 }
 
-/// Any other kind: a title plus whatever the file's frontmatter says.
+/// Any other kind: a title plus whatever the file's frontmatter says. Also a note's
+/// frontmatter as read.
 pub type Fields = Map<String, Value>;
+
+/// `docs/<dir>/<dir>.md`, relative to the vault.
+#[must_use]
+pub fn path(id: &DocId) -> PathBuf {
+    let dir = id.dir();
+    Path::new("docs").join(&dir).join(format!("{dir}.md"))
+}
+
+/// The doc's frontmatter and body; `None` when it has no note.
+pub fn read(vault: &Vault, id: &DocId) -> Result<Option<(Fields, String)>> {
+    let rel = path(id);
+    vault
+        .read(&rel)?
+        .map(|text| note::read(&text, &rel))
+        .transpose()
+}
+
+/// The doc's frontmatter as JSON, envelope and kind metadata together.
+pub fn fields<B: Serialize>(doc: &Doc<B>) -> Result<Fields> {
+    match serde_json::to_value(doc) {
+        Ok(Value::Object(m)) => Ok(m),
+        Ok(_) => Err(Error::Invalid {
+            path: path(&doc.id),
+            why: "a doc is not a JSON object".to_owned(),
+        }),
+        Err(source) => Err(Error::Decode {
+            what: "doc",
+            source,
+        }),
+    }
+}
+
+/// The note text. Without `aliases`, they are the title and a single keyword: paperdb kept
+/// a paper's short name (π0) as its only keyword, and HF keyword lists are topics, not names.
+pub fn text(id: &DocId, mut fm: Fields, body: &str) -> Result<String> {
+    if !fm.contains_key("aliases") {
+        let title = fm.get("title").and_then(Value::as_str);
+        let handle = match fm
+            .get("keywords")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+        {
+            Some([Value::String(k)]) => Some(k.as_str()),
+            _ => None,
+        };
+        let mut aliases: Vec<Value> = Vec::new();
+        for a in title.into_iter().chain(handle) {
+            if !a.is_empty() && !aliases.iter().any(|v| v.as_str() == Some(a)) {
+                aliases.push(Value::String(a.to_owned()));
+            }
+        }
+        if !aliases.is_empty() {
+            fm.insert("aliases".to_owned(), Value::Array(aliases));
+        }
+    }
+    note::render(&fm, body, &path(id))
+}
+
+/// Writes the note: the doc exists once it does.
+pub fn write(vault: &Vault, id: &DocId, fm: Fields, body: &str) -> Result<()> {
+    vault.write(&path(id), text(id, fm, body)?)
+}
 
 /// Structured extraction, written by an agent from the paper text.
 /// `None` / empty means "the paper does not say", never a guess.

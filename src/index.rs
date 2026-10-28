@@ -11,17 +11,19 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde_json::{Value, json};
 
 use crate::chunk::{self, Chunk};
+use crate::contract::Kind;
 use crate::doc::Taint;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
 use crate::id::{DocId, Slug};
 use crate::log::Entry;
+use crate::note::{Names, Target};
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
-use crate::{contract::Kind, page};
+use crate::{doc, note, page};
 
 /// Bumped on any change to the tables or to chunking: a mismatch drops the index.
-pub const SCHEMA: i32 = 2;
+pub const SCHEMA: i32 = 3;
 
 const DDL: &str = "
 CREATE TABLE docs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
@@ -34,6 +36,7 @@ CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, model TEXT NOT NULL, dim INTEGE
     v BLOB NOT NULL);
 CREATE TABLE links (src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL);
 CREATE INDEX links_src ON links (src);
+CREATE INDEX links_dst ON links (dst);
 CREATE TABLE repos (name TEXT PRIMARY KEY, path TEXT NOT NULL, remote TEXT,
     head TEXT NOT NULL, indexed_at TEXT NOT NULL);
 ";
@@ -239,7 +242,8 @@ fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool)
     let tx = ix.conn.transaction()?;
     let mut seen = BTreeSet::new();
     let mut changed = 0;
-    vault_sources(vault, &mut counts.warnings, |s| {
+    let names = names(vault)?;
+    vault_sources(vault, &names, &mut counts.warnings, |s| {
         changed += usize::from(upsert(&tx, &s)?);
         seen.insert(s.id);
         Ok(())
@@ -359,10 +363,11 @@ pub fn reindex_pages(
     };
     let mut warnings = Vec::new();
     let lock = write_lock(path)?;
+    let names = names(vault)?;
     let tx = ix.conn.transaction()?;
     for slug in slugs {
         if vault.path(&page::path(slug)).is_file() {
-            match page_source(vault, slug.as_str()) {
+            match page_source(vault, &names, slug.as_str()) {
                 Ok(s) => {
                     upsert(&tx, &s)?;
                 }
@@ -448,11 +453,17 @@ fn delete(tx: &Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Docs and pages that link to the repo: by its name, its card id, or its remote.
+/// Docs and pages that link to the repo: by its name, its card id, or its remote, which
+/// a paper names in its `links{code, ...}` URLs.
 fn linked_from(tx: &Transaction<'_>, repo: &Repo, remote: Option<&str>) -> Result<Vec<String>> {
     let remote = remote.map(repos::canonical_url);
     let card = format!("repo:{}", repo.name);
-    let mut stmt = tx.prepare("SELECT src, dst FROM links WHERE src NOT LIKE 'repo:%'")?;
+    let mut stmt = tx.prepare(
+        "SELECT src, dst FROM links WHERE src NOT LIKE 'repo:%'
+         UNION ALL SELECT d.id, j.value FROM docs d, json_each(d.meta, '$.links') j
+         WHERE d.id NOT LIKE 'repo:%' AND json_type(d.meta, '$.links') = 'object'
+            AND j.type = 'text'",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out = BTreeSet::new();
     for row in rows {
@@ -545,11 +556,12 @@ fn embed_missing(
 /// memory. Unreadable files are warnings, not failures: `brain lint` is where they get fixed.
 fn vault_sources(
     vault: &Vault,
+    names: &Names,
     warnings: &mut Vec<String>,
     mut f: impl FnMut(Source) -> Result<()>,
 ) -> Result<()> {
     for name in entries(vault, "docs")? {
-        match doc_source(vault, &name) {
+        match doc_source(vault, names, &name) {
             Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("docs/{name}: {e}")),
         }
@@ -558,7 +570,7 @@ fn vault_sources(
         let Some(slug) = name.strip_suffix(".md") else {
             continue;
         };
-        match page_source(vault, slug) {
+        match page_source(vault, names, slug) {
             Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("pages/{name}: {e}")),
         }
@@ -596,24 +608,18 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
-fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
+fn doc_source(vault: &Vault, names: &Names, dir: &str) -> Result<Source> {
     let id = DocId::from_dir(dir)?;
     let rel = Path::new("docs").join(dir);
-    let meta_path = rel.join("meta.json");
-    let raw = vault.read(&meta_path)?.ok_or_else(|| Error::Invalid {
-        path: meta_path.clone(),
+    let (fm, body) = doc::read(vault, &id)?.ok_or_else(|| Error::Invalid {
+        path: doc::path(&id),
         why: "missing".to_owned(),
     })?;
-    let meta: Value = serde_json::from_str(&raw).map_err(|source| Error::Json {
-        path: meta_path,
-        source,
-    })?;
+    let meta = Value::Object(fm);
     let kind = str_of(&meta, "kind").unwrap_or("note").to_owned();
-    let taint = match str_of(&meta, "taint") {
-        Some("own") => Taint::Own,
-        Some(_) => Taint::External,
-        None => Kind::parse(&kind).map_or(Taint::External, |k| Taint::of(k, &id)),
-    };
+    // From the kind and id, never the frontmatter: an edited `taint: own` must not unfence
+    // a paper (B5). `brain lint` reports the edit.
+    let taint = Kind::parse(&kind).map_or(Taint::External, |k| Taint::of(k, &id));
     let date = ["date", "started_at", "captured_at", "added"]
         .iter()
         .find_map(|k| str_of(&meta, k))
@@ -631,34 +637,16 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     }
     if let Some(html) = vault.read(&rel.join("index.html"))? {
         text.push_str(&chunk::html_text(&html));
-    } else if let Some(md) = vault.read(&rel.join("text.md"))? {
-        text.push_str(&md);
     }
+    text.push_str(&body);
     let id = id.to_string();
-    let mut links = Vec::new();
-    if let Some(Value::Object(l)) = meta.get("links") {
-        links.extend(
-            l.iter()
-                .filter_map(|(rel, v)| Some((v.as_str()?.to_owned(), rel.clone()))),
-        );
-    }
-    if let Some(Value::Array(edges)) = meta.get("lineage") {
-        for e in edges {
-            if str_of(e, "src") == Some(id.as_str())
-                && let (Some(dst), Some(rel)) = (str_of(e, "dst"), str_of(e, "rel"))
-            {
-                links.push((dst.to_owned(), rel.to_owned()));
-            }
-        }
-    }
-    if let Some(Value::Array(a)) = meta.get("attendees") {
-        links.extend(
-            a.iter()
-                .filter_map(|s| Some((s.as_str()?.to_owned(), "attendee".to_owned()))),
-        );
-    }
-    if let Some(p) = str_of(&meta, "project") {
-        links.push((p.to_owned(), "project".to_owned()));
+    // External text's `[[...]]` are matrices and markup, not links.
+    let mut links = match taint {
+        Taint::Own => note::body_links(&body, names),
+        Taint::External => Vec::new(),
+    };
+    if let Value::Object(fm) = &meta {
+        links.extend(note::relations(fm, names));
     }
     Ok(Source {
         title: str_of(&meta, "title").unwrap_or(&id).to_owned(),
@@ -672,38 +660,13 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     })
 }
 
-fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
+fn page_source(vault: &Vault, names: &Names, slug: &str) -> Result<Source> {
     let path = Path::new("pages").join(format!("{slug}.md"));
     let raw = vault.read(&path)?.unwrap_or_default();
-    let (yaml, body) = page::split(&raw).ok_or_else(|| Error::Invalid {
-        path: path.clone(),
-        why: "no frontmatter".to_owned(),
-    })?;
-    let fm = page::parse_yaml(yaml).map_err(|(line, why)| Error::Frontmatter {
-        path,
-        line: line + 1,
-        why,
-    })?;
+    let (fm, body) = note::read(&raw, &path)?;
+    let mut links = note::body_links(&body, names);
+    links.extend(note::relations(&fm, names));
     let fm = Value::Object(fm);
-    let mut links: Vec<(String, String)> = Vec::new();
-    if let Some(Value::Array(ls)) = fm.get("links") {
-        for l in ls {
-            if let Some((rel, Value::String(dst))) = l.as_object().and_then(|o| o.iter().next()) {
-                links.push((dst.clone(), rel.clone()));
-            }
-        }
-    }
-    if let Some(Value::Array(src)) = fm.get("sources") {
-        links.extend(
-            src.iter()
-                .filter_map(|s| Some((s.as_str()?.to_owned(), "cites".to_owned()))),
-        );
-    }
-    links.extend(
-        wikilinks(body)
-            .into_iter()
-            .map(|w| (w, "mentions".to_owned())),
-    );
     Ok(Source {
         id: slug.to_owned(),
         kind: str_of(&fm, "kind").unwrap_or("page").to_owned(),
@@ -712,37 +675,50 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
             .map(|d| d.get(..10).unwrap_or(d).to_owned())
             .unwrap_or_default(),
         taint: Taint::Own,
-        text: body.to_owned(),
+        text: body,
         meta: fm,
         links,
     })
 }
 
+/// Every page slug, and every doc's and page's aliases: what a wikilink can name. A note
+/// that does not read names nothing; the reindex warns about it on its own pass.
+pub(crate) fn names(vault: &Vault) -> Result<Names> {
+    let mut names = Names::default();
+    for name in entries(vault, "docs")? {
+        let Ok(id) = DocId::from_dir(&name) else {
+            continue;
+        };
+        if let Ok(Some((fm, _))) = doc::read(vault, &id) {
+            names.add_aliases(&fm, &Target::Doc(id.clone()));
+        }
+        if vault.has_doc(&id) {
+            names.add_doc(id);
+        }
+    }
+    for name in entries(vault, "pages")? {
+        let Some(slug) = name.strip_suffix(".md") else {
+            continue;
+        };
+        names.add_page(slug);
+        let path = Path::new("pages").join(&name);
+        if let Some(text) = vault.read(&path)?
+            && let Ok((fm, _)) = note::read(&text, &path)
+        {
+            names.add_aliases(&fm, &Target::Page(slug.to_owned()));
+        }
+    }
+    Ok(names)
+}
+
 /// The spans `brain get <id>#<span>` would accept for the doc once indexed, read from the
 /// vault alone: each chunk's heading, in order, so chunk `n` is the `n`th.
 pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
-    Ok(doc_source(vault, &id.dir())?
+    Ok(doc_source(vault, &Names::default(), &id.dir())?
         .chunks()
         .into_iter()
         .map(|c| c.heading)
         .collect())
-}
-
-/// `[[target]]`, `[[target|label]]`, `[[target#span]]`, as targets, in order, once each.
-pub(crate) fn wikilinks(body: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = body;
-    while let Some(i) = rest.find("[[") {
-        rest = rest.get(i + 2..).unwrap_or_default();
-        let Some(end) = rest.find("]]") else { break };
-        let inner = rest.get(..end).unwrap_or_default();
-        let target = inner.split(['|', '#']).next().unwrap_or_default().trim();
-        if !target.is_empty() && !out.iter().any(|t| t == target) {
-            out.push(target.to_owned());
-        }
-        rest = rest.get(end + 2..).unwrap_or_default();
-    }
-    out
 }
 
 /// One source per C3 block: `log:<at>`, with `-2`, `-3`... for blocks at the same second.
@@ -790,11 +766,6 @@ fn log_sources(text: &str) -> Vec<Source> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wikilinks_are_targets() {
-        assert_eq!(wikilinks("a [[x]] b [[y|Y]] [[x#2]] [[ ]]"), ["x", "y"]);
-    }
 
     #[test]
     fn log_blocks_are_sources() {

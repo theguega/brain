@@ -3,6 +3,10 @@
 //! a doc, block or label already in the vault is left alone, so a second run writes nothing;
 //! a source that changed since is reported, not applied.
 //!
+//! A vault in the older layout (`docs/<dir>/meta.json` and `text.md`) is first folded into
+//! one note per doc (see [`crate::doc`]), every stored value kept, so rerunning the
+//! migration upgrades the vault.
+//!
 //! One bad entry, row or file is a failure in the report, never the end of the run.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::contract::Kind;
-use crate::doc::{Artifact, Card, Doc, Paper, PaperLinks, Tag, Taint};
+use crate::doc::{self, Artifact, Card, Doc, Fields, Paper, PaperLinks, Tag, Taint};
 use crate::error::{Error, Result, io};
 use crate::id::{ArxivId, DocId, Slug};
 use crate::ingest::Slot;
@@ -69,6 +73,8 @@ pub struct Report {
     pub skips: usize,
     /// Docs already in the vault, left alone.
     pub existing: usize,
+    /// Docs folded from `meta.json` and `text.md` into their note.
+    pub converted: usize,
     /// Every book or artifact, migrated now or before, with the required metadata it still lacks.
     pub missing: Vec<(DocId, Vec<&'static str>)>,
     /// Data not carried over, or a source that changed since it was migrated.
@@ -80,6 +86,7 @@ pub struct Report {
 /// Paper PDFs go to `pdfs` as `<doc dir>.pdf`, not to the vault: arXiv can serve them again.
 pub fn run(vault: &Vault, src: &Sources<'_>, pdfs: &Path, now: &Now, net: Lookups<'_>) -> Report {
     let mut r = Report::default();
+    fold_layout(vault, &mut r);
     let mut pwc_misses = 0;
     match names(&src.papers.join("papers")) {
         Ok(names) => {
@@ -207,19 +214,16 @@ fn entry(
     let text = dir.join("paper.md");
     let pdf = root.join(".cache/pdf").join(format!("{name}.pdf"));
     let added = noon(&now.tz, &old.added)?;
-    let doc_dir = Vault::doc_dir(&id);
     let cached = pdfs.join(format!("{}.pdf", id.dir()));
     let mut doc = convert(&id, &old, added)?;
-    if vault.has_doc(&id) {
+    if let Some((stored, body)) = doc::read(vault, &id)? {
         r.existing += 1;
-        let mut changed = changed_fields(&vault.path(&doc_dir.join("meta.json")), &doc)?;
-        for (from, ours, what) in [
-            (&text, vault.path(&doc_dir.join("text.md")), "text.md"),
-            (&pdf, cached.clone(), "pdf"),
-        ] {
-            if from.is_file() && fs::read(from).ok() != fs::read(&ours).ok() {
-                changed.push(what.to_owned());
-            }
+        let mut changed = changed_fields(&stored, &doc)?;
+        if text.is_file() && fs::read(&text).ok().as_deref() != Some(body.as_bytes()) {
+            changed.push("text".to_owned());
+        }
+        if pdf.is_file() && fs::read(&pdf).ok() != fs::read(&cached).ok() {
+            changed.push("pdf".to_owned());
         }
         if !changed.is_empty() {
             r.warnings.push(format!(
@@ -244,14 +248,19 @@ fn entry(
         r.warnings
             .push(format!("{id}: its PDF link {p} is not carried over"));
     }
+    let mut successors = Vec::new();
     match &old.source {
         OldSource::Arxiv(aid) => {
             if *pwc_misses < PWC_GIVE_UP {
                 match (net.pwc)(aid) {
                     Ok(found) => {
                         *pwc_misses = 0;
-                        Answer::of(&id, found).fill(&mut doc.body)?;
-                        r.lineage += usize::from(doc.body.get("lineage").is_some());
+                        let answer = Answer::of(&id, found);
+                        if let Value::Object(body) = &mut doc.body {
+                            answer.fill(body);
+                        }
+                        successors = answer.successors;
+                        r.lineage += usize::from(doc.body.get("builds_on").is_some());
                     }
                     Err(e) => {
                         *pwc_misses += 1;
@@ -287,15 +296,163 @@ fn entry(
             old.name
         ));
     }
-    // Text and PDF before meta.json: a doc counts as migrated once its meta exists.
-    if text.is_file() {
-        vault.copy(&text, &doc_dir.join("text.md"))?;
-    }
+    // The PDF before the note: a doc counts as migrated once its note exists.
+    let body = if text.is_file() {
+        io(fs::read_to_string(&text), &text)?
+    } else {
+        String::new()
+    };
     if pdf.is_file() {
         cache_copy(&pdf, &cached)?;
         r.pdfs += 1;
     }
-    vault.write_json(&doc_dir.join("meta.json"), &doc)
+    doc::write(vault, &id, doc::fields(&doc)?, &body)?;
+    lineage::link_successors(vault, &id, &successors).map(drop)
+}
+
+/// Folds every `docs/<dir>/` still holding `meta.json` or `text.md` into its note, in two
+/// passes so a crash anywhere leaves what a rerun finishes. First each missing note is
+/// written, its `builds_on` from the `lineage` edges of every `meta.json` there (an edge
+/// `{src, dst}`, src building on dst, may be stored in dst's meta only). Only once all
+/// are written are old files removed, each only where the note already says what it
+/// says. A note is never overwritten: old files that disagree with it, as an older brain
+/// writes them beside it, stay for you to merge, and `brain lint` names them.
+fn fold_layout(vault: &Vault, r: &mut Report) {
+    let docs = Path::new("docs");
+    let old = |name: &str, file: &str| vault.path(&docs.join(name).join(file)).is_file();
+    let names: Vec<String> = names_of(&vault.path(docs))
+        .into_iter()
+        .filter(|n| old(n, "meta.json") || old(n, "text.md"))
+        .collect();
+    let mut preds: BTreeMap<DocId, Vec<DocId>> = BTreeMap::new();
+    for name in names.iter().filter(|n| old(n, "meta.json")) {
+        let Ok(meta) = read_json::<Value>(&vault.path(&docs.join(name).join("meta.json"))) else {
+            continue;
+        };
+        for e in meta
+            .get("lineage")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let id = |k: &str| e.get(k).and_then(Value::as_str).map(DocId::parse);
+            if let (Some(Ok(src)), Some(Ok(dst))) = (id("src"), id("dst"))
+                && src != dst
+            {
+                let held = preds.entry(src).or_default();
+                if !held.contains(&dst) {
+                    held.push(dst);
+                }
+            }
+        }
+    }
+    let mut written = true;
+    for name in &names {
+        let Ok(id) = DocId::from_dir(name) else {
+            continue;
+        };
+        if vault.has_doc(&id) || !old(name, "meta.json") {
+            continue;
+        }
+        let folded =
+            folded(vault, &id, &preds).and_then(|(fm, body)| doc::write(vault, &id, fm, &body));
+        match folded {
+            Ok(()) => r.converted += 1,
+            Err(e) => {
+                written = false;
+                r.failed.push(format!("docs/{name}: {e}"));
+            }
+        }
+    }
+    // A failed note keeps every meta.json: its rerun needs their edges.
+    if !written {
+        return;
+    }
+    for name in &names {
+        if let Err(e) = tidy(vault, name, &preds, r) {
+            r.failed.push(format!("docs/{name}: {e}"));
+        }
+    }
+}
+
+/// Removes the old files of a folder whose note says the same: `meta.json` when the note's
+/// frontmatter is its fold (`builds_on` and `aliases` aside, which the fold derives),
+/// `text.md` when it is the note's body. Any other is reported and kept.
+fn tidy(
+    vault: &Vault,
+    name: &str,
+    preds: &BTreeMap<DocId, Vec<DocId>>,
+    r: &mut Report,
+) -> Result<()> {
+    let id = DocId::from_dir(name)?;
+    let Some((mut fm, body)) = doc::read(vault, &id)? else {
+        return Ok(());
+    };
+    let dir = Vault::doc_dir(&id);
+    let derived = ["builds_on", "aliases"];
+    for k in derived {
+        fm.remove(k);
+    }
+    if vault.path(&dir.join("meta.json")).is_file() {
+        let (mut want, _) = folded(vault, &id, preds)?;
+        for k in derived {
+            want.remove(k);
+        }
+        if want == fm {
+            vault.remove(&dir.join("meta.json"))?;
+        } else {
+            r.warnings.push(format!(
+                "docs/{name}: meta.json beside the note disagrees with it; kept for you to merge"
+            ));
+        }
+    }
+    if let Some(text) = vault.read(&dir.join("text.md"))? {
+        if text == body {
+            vault.remove(&dir.join("text.md"))?;
+        } else {
+            r.warnings.push(format!(
+                "docs/{name}: text.md beside the note disagrees with its body; kept for you to merge"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The note `meta.json` and `text.md` make. The only values rewritten are the relations:
+/// a paper with `lineage` gets `builds_on`, the papers it builds on in `preds`, and a
+/// meeting's page slugs become wikilinks.
+fn folded(
+    vault: &Vault,
+    id: &DocId,
+    preds: &BTreeMap<DocId, Vec<DocId>>,
+) -> Result<(Fields, String)> {
+    let dir = Vault::doc_dir(id);
+    let meta_path = dir.join("meta.json");
+    let Value::Object(mut fm) = read_json::<Value>(&vault.path(&meta_path))? else {
+        return Err(Error::Invalid {
+            path: meta_path,
+            why: "not a JSON object".to_owned(),
+        });
+    };
+    let body = vault.read(&dir.join("text.md"))?.unwrap_or_default();
+    if fm.remove("lineage").is_some() {
+        let ids = preds.get(id).map_or(&[][..], Vec::as_slice);
+        let links = lineage::builds_on(ids).into_iter().map(Value::String);
+        fm.insert("builds_on".to_owned(), Value::Array(links.collect()));
+    }
+    if fm.get("kind").and_then(Value::as_str) == Some(Kind::MEETING.as_str()) {
+        if let Some(Value::Array(a)) = fm.get_mut("attendees") {
+            for v in a.iter_mut() {
+                if let Some(s) = v.as_str() {
+                    *v = Value::String(ingest::page_link(s));
+                }
+            }
+        }
+        if let Some(Value::String(p)) = fm.get_mut("project") {
+            *p = ingest::page_link(p);
+        }
+    }
+    Ok((fm, body))
 }
 
 /// Copies through a temp file, so a cut copy never passes for the PDF.
@@ -398,9 +555,8 @@ fn to_value<T: Serialize>(v: T) -> Result<Value> {
     })
 }
 
-/// The [`FROM_SOURCE`] fields where the stored meta and `doc` disagree.
-fn changed_fields(meta: &Path, doc: &Doc<Value>) -> Result<Vec<String>> {
-    let stored: Value = read_json(meta)?;
+/// The [`FROM_SOURCE`] fields where the stored note and `doc` disagree.
+fn changed_fields(stored: &Fields, doc: &Doc<Value>) -> Result<Vec<String>> {
     let fresh = to_value(doc)?;
     // A HAL deposit became a paper after its record came in: its URL moved into links.
     let rekinded = stored.get("kind") != fresh.get("kind");
@@ -543,7 +699,7 @@ fn readings(vault: &Vault, dir: &Path, now: &Now, r: &mut Report) {
     let mut migrated: BTreeMap<String, DocId> = BTreeMap::new();
     for d in names_of(&vault.path(Path::new("docs"))) {
         if let Ok(id @ (DocId::File(_) | DocId::Artifact(_))) = DocId::from_dir(&d)
-            && let Ok(m) = read_json::<Value>(&vault.path(&Vault::doc_dir(&id).join("meta.json")))
+            && let Ok(Some((m, _))) = doc::read(vault, &id)
             && let Some(src) = m.get("source").and_then(Value::as_str)
         {
             migrated.insert(src.to_owned(), id);
@@ -557,7 +713,7 @@ fn readings(vault: &Vault, dir: &Path, now: &Now, r: &mut Report) {
     }
 }
 
-/// A reading: kept as `source.<ext>`, its text in `text.md`, its metadata only from the
+/// A reading: kept as `source.<ext>`, its text the note's body, its metadata only from the
 /// file itself (pdfinfo, the epub's OPF). Nothing is guessed.
 fn book(
     vault: &Vault,
@@ -604,10 +760,10 @@ fn book(
             _ => epub(path)?,
         };
         vault.copy(path, &dir.join(format!("source.{ext}")))?;
-        match text {
-            Ok(t) => vault.write(&dir.join("text.md"), &t)?,
-            Err(why) => r.warnings.push(format!("{id} ({name}): no text: {why}")),
-        }
+        let text = text.unwrap_or_else(|why| {
+            r.warnings.push(format!("{id} ({name}): no text: {why}"));
+            String::new()
+        });
         let doc = Doc {
             taint: Taint::of(Kind::BOOK, &id),
             id: id.clone(),
@@ -618,10 +774,10 @@ fn book(
             source: Some(name),
             body,
         };
-        vault.write_json(&dir.join("meta.json"), &doc)?;
+        doc::write(vault, &id, doc::fields(&doc)?, &text)?;
         r.books += 1;
     }
-    let meta: Value = read_json(&vault.path(&dir.join("meta.json")))?;
+    let meta = stored(vault, &id)?;
     let lacks: Vec<&'static str> = [
         ("title", meta.get("title")),
         ("authors", meta.get("authors")),
@@ -655,11 +811,10 @@ fn artifact(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
-    let slot = ingest::artifact_slot(vault, &title, &name, "index.html", &bytes)?;
+    let slot = ingest::artifact_slot(vault, &title, &name, ingest::ARTIFACT_FILE, &bytes)?;
     let held = matches!(slot, Slot::Held(_));
     let id = slot.id();
-    let dir = Vault::doc_dir(&id);
-    let page = dir.join("index.html");
+    let page = Vault::doc_dir(&id).join(ingest::ARTIFACT_FILE);
     if held {
         r.existing += 1;
     } else if let Some(old) = migrated.get(&name) {
@@ -682,14 +837,24 @@ fn artifact(
                 captured_at: modified(&now.tz, path)?,
             },
         };
-        vault.write_json(&dir.join("meta.json"), &doc)?;
+        doc::write(vault, &id, doc::fields(&doc)?, "")?;
         r.artifacts += 1;
     }
-    let meta: Value = read_json(&vault.path(&dir.join("meta.json")))?;
+    let meta = stored(vault, &id)?;
     if meta.get("why").is_none() {
         r.missing.push((id, vec!["why"]));
     }
     Ok(())
+}
+
+/// A doc's frontmatter, which must be there.
+fn stored(vault: &Vault, id: &DocId) -> Result<Fields> {
+    doc::read(vault, id)?
+        .map(|(fm, _)| fm)
+        .ok_or_else(|| Error::Invalid {
+            path: doc::path(id),
+            why: "missing".to_owned(),
+        })
 }
 
 /// A metadata value that says something. Placeholders count as missing: Calibre's
