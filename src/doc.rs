@@ -39,9 +39,9 @@ pub enum Taint {
 impl Taint {
     #[must_use]
     pub fn of(kind: Kind, id: &DocId) -> Self {
-        let outside = [Kind::PAPER, Kind::BLOG, Kind::NEWS, Kind::BOOK].contains(&kind)
-            || matches!(id, DocId::Web(_));
-        if outside { Self::External } else { Self::Own }
+        // Only notes and meetings are own: the rest, an artifact made with a model too, is data.
+        let own = [Kind::NOTE, Kind::MEETING].contains(&kind) && !matches!(id, DocId::Web(_));
+        if own { Self::Own } else { Self::External }
     }
 }
 

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::contract::Kind;
-use crate::doc::{Card, Doc, Paper, PaperLinks, Tag, Taint};
+use crate::doc::{Artifact, Card, Doc, Paper, PaperLinks, Tag, Taint};
 use crate::error::{Error, Result, io};
 use crate::id::{ArxivId, DocId, Slug};
 use crate::label::{self, Label, Verdict};
@@ -32,6 +32,7 @@ const NOON: &str = "12:00";
 /// Papers with Code failures in a row after which it counts as down for this run: one
 /// slow reply must not cost every paper after it its lineage.
 const PWC_GIVE_UP: u32 = 3;
+const DATE_FORMAT: &str = "+%Y-%m-%dT%H:%M:%S%z";
 
 #[derive(Clone, Copy, Debug)]
 pub struct Sources<'a> {
@@ -62,10 +63,12 @@ pub struct Report {
     pub lineage: usize,
     pub journal: usize,
     pub books: usize,
+    /// Html readings: pages, not books, kept as they are.
+    pub artifacts: usize,
     pub skips: usize,
     /// Docs already in the vault, left alone.
     pub existing: usize,
-    /// Every book, migrated now or before, with the required metadata it still lacks.
+    /// Every book or artifact, migrated now or before, with the required metadata it still lacks.
     pub missing: Vec<(DocId, Vec<&'static str>)>,
     /// Data not carried over, or a source that changed since it was migrated.
     pub warnings: Vec<String>,
@@ -535,10 +538,10 @@ fn readings(vault: &Vault, dir: &Path, now: &Now, r: &mut Report) {
         Ok(n) => n,
         Err(e) => return r.failed.push(e.to_string()),
     };
-    // Books already in the vault by file name: a name now under another hash changed.
+    // Readings already in the vault by file name: one now under another id changed.
     let mut migrated: BTreeMap<String, DocId> = BTreeMap::new();
     for d in names_of(&vault.path(Path::new("docs"))) {
-        if let Ok(id @ DocId::File(_)) = DocId::from_dir(&d)
+        if let Ok(id @ (DocId::File(_) | DocId::Artifact(_))) = DocId::from_dir(&d)
             && let Ok(m) = read_json::<Value>(&vault.path(&Vault::doc_dir(&id).join("meta.json")))
             && let Some(src) = m.get("source").and_then(Value::as_str)
         {
@@ -554,7 +557,7 @@ fn readings(vault: &Vault, dir: &Path, now: &Now, r: &mut Report) {
 }
 
 /// A reading: kept as `source.<ext>`, its text in `text.md`, its metadata only from the
-/// file itself (pdfinfo, the epub's OPF, the html head). Nothing is guessed.
+/// file itself (pdfinfo, the epub's OPF). Nothing is guessed.
 fn book(
     vault: &Vault,
     path: &Path,
@@ -576,6 +579,9 @@ fn book(
             .push(format!("{name}: not a pdf, epub or html file; skipped"));
         return Ok(());
     }
+    if matches!(ext.as_str(), "html" | "htm") {
+        return artifact(vault, path, name, now, migrated, r);
+    }
     let id = DocId::file(&ingest::sha256(path)?).ok_or_else(|| Error::BadRef(name.clone()))?;
     if let Some(first) = seen.get(&id) {
         r.warnings
@@ -594,11 +600,7 @@ fn book(
     } else {
         let (body, text) = match ext.as_str() {
             "pdf" => (pdf_meta(path)?, ingest::pdf_to_text(path)),
-            "epub" => epub(path)?,
-            _ => {
-                let html = String::from_utf8_lossy(&io(fs::read(path), path)?).into_owned();
-                (html_meta(&html), Ok(chunk::html_text(&html)))
-            }
+            _ => epub(path)?,
         };
         vault.copy(path, &dir.join(format!("source.{ext}")))?;
         match text {
@@ -630,6 +632,63 @@ fn book(
     .collect();
     if !lacks.is_empty() {
         r.missing.push((id, lacks));
+    }
+    Ok(())
+}
+
+/// An html reading is a page, so an artifact as `brain add` makes one: `artifact:<title
+/// slug>`, the page as `index.html`, captured when the file was last written. Its `why`
+/// is not in the file, so it is reported missing.
+fn artifact(
+    vault: &Vault,
+    path: &Path,
+    name: String,
+    now: &Now,
+    migrated: &BTreeMap<String, DocId>,
+    r: &mut Report,
+) -> Result<()> {
+    let html = String::from_utf8_lossy(&io(fs::read(path), path)?).into_owned();
+    let title = known(&ingest::html_title(&html)).unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let id = DocId::artifact(&title).ok_or_else(|| Error::BadRef(name.clone()))?;
+    let dir = Vault::doc_dir(&id);
+    let page = dir.join("index.html");
+    if vault.has_doc(&id) {
+        r.existing += 1;
+        if vault.read(&page)?.as_deref() != Some(html.as_str()) {
+            r.warnings.push(format!(
+                "{name}: changed since it was migrated as {id}; not migrated again"
+            ));
+        }
+    } else if let Some(old) = migrated.get(&name) {
+        r.warnings.push(format!(
+            "{name}: changed since it was migrated as {old}; not migrated again"
+        ));
+        return Ok(());
+    } else {
+        vault.copy(path, &page)?;
+        let doc = Doc {
+            taint: Taint::of(Kind::ARTIFACT, &id),
+            id: id.clone(),
+            kind: Kind::ARTIFACT,
+            added: now.at.clone(),
+            tags: Vec::new(),
+            why: None,
+            source: Some(name),
+            body: Artifact {
+                title,
+                captured_at: modified(&now.tz, path)?,
+            },
+        };
+        vault.write_json(&dir.join("meta.json"), &doc)?;
+        r.artifacts += 1;
+    }
+    let meta: Value = read_json(&vault.path(&dir.join("meta.json")))?;
+    if meta.get("why").is_none() {
+        r.missing.push((id, vec!["why"]));
     }
     Ok(())
 }
@@ -731,45 +790,6 @@ fn epub(path: &Path) -> Result<(Book, Result<String, String>)> {
         }
     }
     Ok((book, Ok(text)))
-}
-
-/// `<title>`, `<meta name="author">`, a date meta's year and `<link rel="canonical">`.
-fn html_meta(html: &str) -> Book {
-    let head = html
-        .to_ascii_lowercase()
-        .find("</head>")
-        .and_then(|i| html.get(..i))
-        .unwrap_or(html);
-    let metas = start_tags(head, "meta");
-    let meta = |names: &[&str]| {
-        metas.iter().find_map(|t| {
-            let n = attr(t, "name").or_else(|| attr(t, "property"))?;
-            names
-                .iter()
-                .any(|x| n.eq_ignore_ascii_case(x))
-                .then(|| attr(t, "content"))?
-        })
-    };
-    Book {
-        title: known(&ingest::html_title(head)),
-        authors: meta(&["author", "citation_author", "dc.creator"])
-            .and_then(known)
-            .into_iter()
-            .collect(),
-        year: meta(&[
-            "citation_publication_date",
-            "citation_date",
-            "dc.date",
-            "date",
-        ])
-        .and_then(year),
-        links: start_tags(head, "link")
-            .into_iter()
-            .filter(|t| attr(t, "rel").is_some_and(|r| r.eq_ignore_ascii_case("canonical")))
-            .find_map(|t| attr(t, "href"))
-            .filter(|h| h.starts_with("http://") || h.starts_with("https://"))
-            .map(|h| BookLinks { home: h.to_owned() }),
-    }
 }
 
 /// Every `<name ...>` start tag, `<` to `>`, matched without regard to case.
@@ -930,11 +950,10 @@ fn skips(vault: &Vault, inbox: &Path, now: &Now, r: &mut Report) -> Result<()> {
 /// the POSIX rule in its footer, which slim zoneinfo files (macOS, recent distros) rely on.
 fn noon(tz: &str, day: &str) -> Result<String> {
     let when = format!("{day} {NOON}");
-    const FORMAT: &str = "+%Y-%m-%dT%H:%M:%S%z";
     let gnu = run_cmd(
         Command::new("date")
             .env("TZ", tz)
-            .args(["-d", &when, FORMAT]),
+            .args(["-d", &when, DATE_FORMAT]),
     );
     let s = match gnu {
         Ok(s) => s,
@@ -943,17 +962,38 @@ fn noon(tz: &str, day: &str) -> Result<String> {
             "-f",
             "%Y-%m-%d %H:%M",
             &when,
-            FORMAT,
+            DATE_FORMAT,
         ]))?,
     };
-    let s = s.trim();
-    match s.split_at_checked(s.len().saturating_sub(2)) {
-        Some((head, mm)) if head.len() == 22 && head.starts_with(day) => Ok(format!("{head}:{mm}")),
-        _ => Err(Error::Command {
+    stamp(&s)
+        .filter(|t| t.starts_with(day))
+        .ok_or_else(|| Error::Command {
             cmd: "date".to_owned(),
             detail: format!("unexpected output {s:?} for day {day:?}"),
-        }),
-    }
+        })
+}
+
+/// When `path` was last written, as `YYYY-MM-DDTHH:MM:SS±hh:mm` in `tz`. `date -r` reads
+/// a file's mtime on GNU and BSD alike.
+fn modified(tz: &str, path: &Path) -> Result<String> {
+    let s = run_cmd(
+        Command::new("date")
+            .env("TZ", tz)
+            .arg("-r")
+            .arg(path)
+            .arg(DATE_FORMAT),
+    )?;
+    stamp(&s).ok_or_else(|| Error::Command {
+        cmd: "date".to_owned(),
+        detail: format!("unexpected output {s:?} for {}", path.display()),
+    })
+}
+
+/// `date`'s `…±hhmm` as RFC 3339's `…±hh:mm`.
+fn stamp(s: &str) -> Option<String> {
+    let s = s.trim();
+    let (head, mm) = s.split_at_checked(s.len().checked_sub(2)?)?;
+    (head.len() == 22).then(|| format!("{head}:{mm}"))
 }
 
 /// Entry names of a directory that may not exist yet; none then.

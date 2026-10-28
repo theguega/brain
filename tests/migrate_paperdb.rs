@@ -273,9 +273,7 @@ fn fixture(dir: &Path) -> Fixture {
     epub(dir, &readings.join("bottom.epub"));
     write(
         &readings.join("course.html"),
-        r#"<html><head><title>Legged Control</title><meta name="author" content="Jo Doe">
-           <meta name="date" content="2021-05-01"><link rel="canonical" href="https://example.org/legged">
-           </head><body><h1>LQR</h1><p>Riccati.</p></body></html>"#,
+        "<html><head><title>Legged Control</title></head><body><h1>LQR</h1><p>Riccati.</p></body></html>",
     );
     write(&readings.join(".DS_Store"), "junk");
     Fixture {
@@ -376,9 +374,17 @@ fn migrates_papers_journal_readings_and_skips() {
     let r = migrate_paperdb::run(&v, &fx.sources(), &fx.pdfs, &now(), NET);
     assert_eq!(
         (
-            r.papers, r.blogs, r.pdfs, r.lineage, r.journal, r.books, r.skips, r.existing
+            r.papers,
+            r.blogs,
+            r.pdfs,
+            r.lineage,
+            r.journal,
+            r.books,
+            r.artifacts,
+            r.skips,
+            r.existing
         ),
-        (3, 1, 1, 1, 3, 4, 1, 0),
+        (3, 1, 1, 1, 3, 3, 1, 1, 0),
         "{r:#?}"
     );
 
@@ -488,7 +494,7 @@ fn migrates_papers_journal_readings_and_skips() {
     );
 
     let books = books(&v);
-    assert_eq!(books.len(), 4, "{:?}", books.keys());
+    assert_eq!(books.len(), 3, "{:?}", books.keys());
     assert!(
         r.failed.iter().any(|f| f.starts_with("broken.epub")),
         "{:?}",
@@ -508,20 +514,38 @@ fn migrates_papers_journal_readings_and_skips() {
         hack.get("title").is_none() && hack.get("authors").is_none(),
         "{hack}"
     );
-    let html = &books["course.html"];
+    let page = meta(&v, "docs/artifact--legged-control");
     assert_eq!(
         (
-            &html["title"],
-            &html["authors"],
-            &html["year"],
-            &html["links"]
+            &page["kind"],
+            &page["taint"],
+            &page["title"],
+            &page["source"]
         ),
         (
+            &json!("artifact"),
+            &json!("external"),
             &json!("Legged Control"),
-            &json!(["Jo Doe"]),
-            &json!(2021),
-            &json!({"home": "https://example.org/legged"})
+            &json!("course.html")
         )
+    );
+    let mtime = Command::new("date")
+        .env("TZ", "Asia/Tokyo")
+        .arg("-r")
+        .arg(fx.readings.join("course.html"))
+        .arg("+%Y-%m-%dT%H:%M:%S")
+        .output()
+        .unwrap();
+    assert!(
+        page["captured_at"]
+            .as_str()
+            .unwrap()
+            .starts_with(String::from_utf8(mtime.stdout).unwrap().trim()),
+        "captured when the file was written: {page}"
+    );
+    assert_eq!(
+        fs::read(v.path(Path::new("docs/artifact--legged-control/index.html"))).unwrap(),
+        fs::read(fx.readings.join("course.html")).unwrap()
     );
     let ep = &books["bottom.epub"];
     assert_eq!(
@@ -539,8 +563,7 @@ fn migrates_papers_journal_readings_and_skips() {
         let text = fs::read_to_string(d.join("text.md")).unwrap();
         let want = match ext {
             "pdf" => "Hello reader",
-            "epub" => "Alpha",
-            _ => "Riccati.",
+            _ => "Alpha",
         };
         assert!(text.contains(want), "{src}: {text}");
         if ext == "epub" {
@@ -558,13 +581,14 @@ fn migrates_papers_journal_readings_and_skips() {
         [
             "authors links.home",
             "title authors year links.home",
+            "why",
             "year links.home"
         ]
     );
 
     for f in brain::lint::lint(&v).unwrap() {
         let m = meta(&v, &f.file.parent().unwrap().to_string_lossy());
-        assert_eq!(m["kind"], "book", "{f:?}");
+        assert!(m["kind"] == "book" || m["kind"] == "artifact", "{f:?}");
     }
 }
 
@@ -586,9 +610,10 @@ fn a_second_run_changes_nothing_and_new_rows_still_land() {
             second.pdfs,
             second.journal,
             second.books,
+            second.artifacts,
             second.skips
         ),
-        (0, 0, 0, 0, 0, 0)
+        (0, 0, 0, 0, 0, 0, 0)
     );
     assert_eq!(second.existing, 4 + 4);
     assert_eq!(second.missing, first.missing);
@@ -649,7 +674,7 @@ fn a_changed_source_is_reported_not_applied() {
     ));
     assert!(warned(
         &r,
-        "course.html: changed since it was migrated as file:"
+        "course.html: changed since it was migrated as artifact:legged-control"
     ));
 }
 

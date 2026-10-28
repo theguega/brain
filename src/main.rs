@@ -490,6 +490,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
                     ("lineage", json!(r.lineage)),
                     ("journal", json!(r.journal)),
                     ("books", json!(r.books)),
+                    ("artifacts", json!(r.artifacts)),
                     ("skips", json!(r.skips)),
                     ("existing", json!(r.existing)),
                 ]),
