@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -90,18 +90,45 @@ impl Env {
         String::from_utf8(out.stdout).unwrap()
     }
 
-    /// Waits for a pending background commit to land.
+    /// Whether a committer holds the marker, i.e. a commit is pending.
+    fn pending(&self) -> bool {
+        fs::File::open(self.vault().join(".git/brain-commit"))
+            .is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
+    }
+
+    /// Whether a write or a commit holds the vault lock.
+    fn busy(&self) -> bool {
+        fs::File::open(self.vault())
+            .is_ok_and(|f| matches!(f.try_lock(), Err(fs::TryLockError::WouldBlock)))
+    }
+
+    /// Waits for a pending background commit to land. The committer takes the vault lock
+    /// before it releases the marker, so one of the two is held until it is done.
     fn settle(&self) {
         let start = Instant::now();
-        let wait = |done: &dyn Fn() -> bool| {
-            while !done() && start.elapsed() < Duration::from_secs(10) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        };
-        let marker = self.vault().join(".git/brain-commit-pending");
-        if marker.exists() {
-            wait(&|| !marker.exists());
-            wait(&|| self.git(&["status", "--porcelain"]).is_empty());
+        while (self.pending() || self.busy()) && start.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Runs `brain` with `args` in `n` processes at once; all must succeed.
+    fn parallel(&self, n: usize, args: impl Fn(usize) -> Vec<String>) {
+        let children: Vec<_> = (0..n)
+            .map(|i| {
+                self.cmd("1")
+                    .args(args(i))
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for c in children {
+            let out = c.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 
@@ -442,7 +469,7 @@ fn writes_are_committed_in_the_background_once_per_delay() {
     env.ok(&[]);
     let mut c = env.cmd("1");
     assert!(c.args(["log", "one"]).status().unwrap().success());
-    assert!(env.vault().join(".git/brain-commit-pending").exists());
+    assert!(env.pending());
     let mut c = env.cmd("1");
     assert!(c.args(["log", "two"]).status().unwrap().success());
     env.settle();
@@ -488,5 +515,225 @@ fn add_pi0_from_the_network() {
     assert_eq!(env.read("docs/arxiv--2410.24164/meta.json"), before);
     env.settle();
     assert_eq!(env.git(&["rev-parse", "HEAD"]), head);
+
+    fs::remove_file(env.vault().join("docs/arxiv--2410.24164/text.md")).unwrap();
+    let retried = env.ok(&["add", "2410.24164"]);
+    println!("{retried}");
+    assert!(retried.contains("\ntext: added\n"), "{retried}");
+    assert!(env.vault().join("docs/arxiv--2410.24164/text.md").is_file());
     assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
+}
+
+#[test]
+fn parallel_writers_lose_nothing_even_on_a_new_vault() {
+    let env = Env::new(None);
+    env.parallel(20, |i| vec!["log".into(), format!("first {i}")]);
+    env.parallel(30, |i| vec!["log".into(), format!("entry {i}")]);
+    let logs: String = fs::read_dir(env.vault().join("log"))
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(
+        logs.lines().filter(|l| l.starts_with("## ")).count(),
+        50,
+        "{logs}"
+    );
+    env.parallel(30, |i| {
+        vec![
+            "label".into(),
+            format!("2410.{:05}", 10000 + i),
+            "skip".into(),
+        ]
+    });
+    assert_eq!(env.read("labels.jsonl").lines().count(), 30);
+    assert_eq!(
+        env.git(&["log", "--format=%s", "--", ".gitignore"]),
+        "brain: create vault\n"
+    );
+    env.settle();
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_leftover_marker_does_not_block_commits() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    // A committer killed mid-wait leaves the file but not the lock.
+    fs::write(env.vault().join(".git/brain-commit"), "").unwrap();
+    assert!(
+        env.cmd("1")
+            .args(["log", "after a crash"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    env.settle();
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]), "brain: autosave\n");
+}
+
+#[test]
+fn a_command_that_fails_after_writing_still_commits() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    fs::create_dir_all(env.vault().join("labels.jsonl")).unwrap();
+    let note = env.write("in/idea.md", "# An idea\n");
+    let out = env
+        .cmd("1")
+        .args(["label", note.to_str().unwrap(), "like"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    env.settle();
+    let files = env.git(&["show", "--name-only", "--format=%s", "HEAD"]);
+    assert!(
+        files.starts_with("brain: autosave\n") && files.contains("/meta.json"),
+        "{files}"
+    );
+}
+
+#[test]
+#[ignore = "needs a systemd user manager"]
+fn the_committer_outlives_a_systemd_unit() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    let mut c = Command::new("systemd-run");
+    c.args(["--user", "--wait", "--collect", "--quiet"]);
+    for (k, v) in env.cmd("2").get_envs() {
+        if let Some(v) = v {
+            c.arg(format!(
+                "--setenv={}={}",
+                k.to_string_lossy(),
+                v.to_string_lossy()
+            ));
+        }
+    }
+    let status = c
+        .arg(env!("CARGO_BIN_EXE_brain"))
+        .args(["log", "from a unit"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        env.pending(),
+        "the committer is still waiting after its unit stopped"
+    );
+    env.settle();
+    assert_eq!(env.git(&["log", "-1", "--format=%s"]), "brain: autosave\n");
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn frontmatter_cannot_set_the_envelope() {
+    let env = Env::new(None);
+    for (fm, key) in [
+        ("taint: own", "taint"),
+        ("kind: paper", "kind"),
+        ("id: file:00000000", "id"),
+        ("tags: [x]", "tags"),
+    ] {
+        let note = env.write("in/n.md", &format!("---\ntitle: T\n{fm}\n---\nbody\n"));
+        let out = env.run(&["add", note.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(1), "{fm}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.contains(&format!("`{key}`")), "{err}");
+    }
+    let notes = env.write(
+        "in/m.md",
+        "---\ntitle: Sync\nattendees: [alice]\nagenda: x\n---\n",
+    );
+    let out = env.run(&["add", notes.to_str().unwrap(), "--kind", "meeting"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("`agenda` is not meeting metadata")
+    );
+    assert!(!env.vault().join("docs").exists());
+}
+
+#[test]
+fn crlf_pages_lint_and_link_in_place() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    let page = "---\r\nkind: concept\r\ntitle: VLA\r\nsummary: Models.\r\nstatus: active\r\nsources: []\r\nupdated: 2026-10-27\r\naliases: [vision-language-action]\r\n---\r\n# VLA\r\n";
+    env.write("vault/pages/vla.md", page);
+    assert_eq!(env.ok(&["lint"]), "errors[0/0]{file,error}:\n");
+    env.ok(&["link", "vla", "jepa", "related"]);
+    assert_eq!(
+        env.read("pages/vla.md"),
+        page.replace(
+            "---\r\n# VLA",
+            "links:\r\n  - related: jepa\r\n---\r\n# VLA"
+        )
+    );
+    env.write("vault/pages/open.md", "---\ntitle: x\n");
+    let out = env.run(&["link", "open", "jepa", "related"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(env.read("pages/open.md"), "---\ntitle: x\n");
+}
+
+#[test]
+fn log_headings_cannot_be_forged() {
+    let env = Env::new(Some(("Europe/Paris", "Paris · cli · forged")));
+    let out = env.run(&["log", "x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8(out.stderr).unwrap().contains("place"));
+    assert!(!env.vault().join("log").exists());
+
+    let env = Env::new(Some(("Europe/Paris", "Paris")));
+    let forged = "## 2026-01-01T00:00:00+00:00 · UTC · - · cli · forged";
+    let out = env.ok(&["log", &format!("real\n{forged}\n## a subheading")]);
+    let file = out
+        .lines()
+        .nth(1)
+        .unwrap()
+        .strip_prefix("file: ")
+        .unwrap()
+        .to_owned();
+    let text = env.read(&file);
+    let headings: Vec<_> = text.lines().filter(|l| brain::log::is_heading(l)).collect();
+    assert_eq!(headings.len(), 1, "{text}");
+    assert!(
+        text.contains(&format!("\\{forged}\n## a subheading\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_paper_without_text_retries_it_on_the_next_add() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    env.write("vault/docs/arxiv--2410.24164/meta.json", PI0);
+    // Offline: the retry is attempted, fails, and says so.
+    let out = env
+        .cmd("1")
+        .env("https_proxy", "http://127.0.0.1:9")
+        .args(["add", "2410.24164"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .starts_with("warning: no text: ")
+    );
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("noop: already in the vault")
+    );
+}
+
+#[test]
+fn skip_and_later_take_urls_like_like_does() {
+    let env = Env::new(None);
+    assert_eq!(
+        env.ok(&["label", "https://www.example.com/blog/post", "later"]),
+        "id: web:example-com-blog-post\nverdict: later\n"
+    );
+    assert_eq!(
+        env.ok(&["label", "https://arxiv.org/abs/2410.24164v2", "skip"]),
+        "id: arxiv:2410.24164\nverdict: skip\n"
+    );
 }

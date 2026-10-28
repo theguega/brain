@@ -52,7 +52,15 @@ pub fn now() -> Result<Now> {
     let (tz, place) = match context_path() {
         Some(p) if p.is_file() => {
             let c: Context = read_json(&p)?;
-            (c.tz, c.place.filter(|p| !p.is_empty()))
+            if let Some(place) = &c.place
+                && !is_place(place)
+            {
+                return Err(Error::Invalid {
+                    path: p,
+                    why: format!("place {place:?} must be one line, without ' · ', and not '-'"),
+                });
+            }
+            (c.tz, c.place)
         }
         _ => (system_tz(), None),
     };
@@ -85,11 +93,35 @@ fn system_tz() -> String {
         .unwrap_or_else(|| "UTC".to_owned())
 }
 
+/// A place fits one field of a C3 heading: `-` there means unknown.
+fn is_place(p: &str) -> bool {
+    !p.is_empty()
+        && p != "-"
+        && !p.contains('·')
+        && !p.chars().any(char::is_control)
+        && p.trim() == p
+}
+
+/// An IANA zone name with a TZif file: not `zone.tab`, `posixrules`, nor the
+/// `posix/` and `right/` trees (the latter counts leap seconds).
 fn is_zone(tz: &str) -> bool {
-    !tz.is_empty()
-        && !tz.starts_with('/')
-        && !tz.contains("..")
-        && Path::new(ZONEINFO).join(tz).is_file()
+    let named = tz.split('/').all(|seg| {
+        seg.starts_with(|c: char| c.is_ascii_alphabetic())
+            && seg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_+-".contains(&b))
+    });
+    let special = matches!(
+        tz.split('/').next(),
+        Some("posix" | "right" | "posixrules" | "localtime" | "Factory")
+    );
+    let mut magic = [0u8; 4];
+    named
+        && !special
+        && std::fs::File::open(Path::new(ZONEINFO).join(tz))
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic))
+            .is_ok()
+        && &magic == b"TZif"
 }
 
 /// `date` knows every zone the system does; an unknown `TZ` would silently mean UTC, hence the check.
@@ -124,5 +156,25 @@ mod tests {
         assert_eq!(at.len(), 25, "{at}");
         assert!(at.ends_with("+09:00"), "{at}");
         assert!(local_time("Mars/Olympus").is_err());
+        for bad in [
+            "zone.tab",
+            "tzdata.zi",
+            "posixrules",
+            "right/UTC",
+            "posix/Europe/Paris",
+            "../etc/passwd",
+            "Factory",
+        ] {
+            assert!(!is_zone(bad), "{bad}");
+        }
+        for good in [
+            "UTC",
+            "Europe/Paris",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+5",
+        ] {
+            assert!(is_zone(good), "{good}");
+        }
+        assert!(is_place("Paris") && !is_place("-") && !is_place("A · B") && !is_place("A\n## x"));
     }
 }

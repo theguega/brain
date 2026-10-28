@@ -5,12 +5,13 @@
 //! labels.jsonl          C7      profile.md        C5
 //! ```
 //!
-//! Every write is a temp file then a rename. Commits happen in the background, at most
-//! one a minute: see [`Vault::commit_later`].
+//! Every write is a temp file then a rename; read-modify-writes hold the vault lock (a
+//! `flock` on the root directory). Commits happen in the background, at most one per
+//! delay: see [`Vault::commit_later`].
 
 use std::cell::Cell;
-use std::fs::{self, OpenOptions};
-use std::io::ErrorKind;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{BufRead as _, BufReader, ErrorKind, Write as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,11 +24,12 @@ use crate::error::{Error, Result, io};
 use crate::id::DocId;
 
 const GITIGNORE: &str = ".*.tmp\n.DS_Store\n";
-/// Inside `.git`, so it is never committed. Present while a commit is pending.
-const MARKER: &str = ".git/brain-commit-pending";
+/// Inside `.git`, so it is never committed. Locked by the pending committer for as long as
+/// it waits; the kernel drops the lock when it exits or is killed, so it never goes stale.
+const MARKER: &str = ".git/brain-commit";
 const DELAY: Duration = Duration::from_secs(60);
-/// Sleeps, then commits whatever is pending. Writes made during the sleep share the commit.
-const COMMITTER: &str = r#"sleep "$1"; rm -f "$2"; cd "$3" && git add -A && { git diff --cached --quiet || git -c commit.gpgsign=false commit -q -m "brain: autosave"; }"#;
+/// Set to the vault root, this env var makes `brain` run as the committer.
+pub const COMMITTER_ENV: &str = "BRAIN_COMMIT";
 
 #[derive(Debug)]
 pub struct Vault {
@@ -56,28 +58,30 @@ impl Vault {
     }
 
     /// Opens the vault, creating it as a fresh git repo with no remote if needed.
+    /// Concurrent first uses wait on the lock, and exactly one creates it.
     pub fn open_or_create(root: &Path) -> Result<Self> {
         if root.join(".git").exists() {
             return Self::open(root);
         }
         io(fs::create_dir_all(root), root)?;
-        git(root, &["init", "-q"])?;
-        let v = Self::open(root)?;
-        v.write(Path::new(".gitignore"), GITIGNORE)?;
-        git(root, &["add", "-A"])?;
-        git(
-            root,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "-m",
-                "brain: create vault",
-            ],
-        )?;
-        v.dirty.set(false);
-        Ok(v)
+        let _lock = lock(root)?;
+        if !root.join(".git").exists() {
+            git(root, &["init", "-q"])?;
+            write_atomic(&root.join(".gitignore"), GITIGNORE)?;
+            git(root, &["add", "-A"])?;
+            git(
+                root,
+                &[
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "brain: create vault",
+                ],
+            )?;
+        }
+        Self::open(root)
     }
 
     #[must_use]
@@ -115,9 +119,9 @@ impl Vault {
         if let Some(dir) = p.parent() {
             io(fs::create_dir_all(dir), dir)?;
         }
-        write_atomic(&p, contents)?;
+        // Set first: a rename that fails after the temp landed still leaves work to commit.
         self.dirty.set(true);
-        Ok(())
+        write_atomic(&p, contents)
     }
 
     /// Pretty JSON with a trailing newline, so git diffs stay line-based.
@@ -130,72 +134,150 @@ impl Vault {
         self.write(rel, &s)
     }
 
-    /// Read, extend, rename: an append is as atomic as any other write.
-    pub fn append(&self, rel: &Path, text: &str) -> Result<()> {
-        let mut s = self.read(rel)?.unwrap_or_default();
-        s.push_str(text);
-        self.write(rel, &s)
+    /// Read, change, rename, under the vault lock, so concurrent updates never lose one.
+    /// `f` returns the new contents, or `None` to leave the file alone. `true` if written.
+    pub fn update(
+        &self,
+        rel: &Path,
+        f: impl FnOnce(Option<String>) -> Result<Option<String>>,
+    ) -> Result<bool> {
+        let _lock = lock(&self.root)?;
+        match f(self.read(rel)?)? {
+            Some(new) => self.write(rel, &new).map(|()| true),
+            None => Ok(false),
+        }
     }
 
-    /// Commits this process's writes within a minute, without a daemon.
+    pub fn append(&self, rel: &Path, text: &str) -> Result<()> {
+        self.update(rel, |old| Ok(Some(old.unwrap_or_default() + text)))
+            .map(drop)
+    }
+
+    /// Commits this process's writes within the delay, without a daemon.
     ///
-    /// The first write after a commit creates the marker and starts a detached `sh` that
-    /// sleeps, removes the marker, and commits everything pending. Later writes see the
-    /// marker and leave the pending commit to pick them up, so there is at most one commit
-    /// per delay. The child is in its own process group, so it survives Ctrl-C and the
-    /// end of `brain`. A marker older than twice the delay belongs to a committer that
-    /// died (a reboot) and is replaced.
+    /// If no committer is pending (the marker is not locked), this starts `brain` again as
+    /// a detached committer and waits for its handshake: the committer locks the marker,
+    /// says `ok`, sleeps for the delay, takes the vault lock, unlocks the marker, then
+    /// commits everything pending. A write that finds the marker locked is picked up by that
+    /// commit, because the unlock comes before `git add`. So commits are at least a delay apart.
+    /// Under systemd (`INVOCATION_ID` is set) the committer starts in its own transient
+    /// scope through `systemd-run --user --scope`, so it outlives the unit that wrote.
     pub fn commit_later(&self) -> Result<()> {
         if !self.dirty.get() {
             return Ok(());
         }
-        let delay = commit_delay();
         let marker = self.root.join(MARKER);
-        let claim = || {
+        let file = io(
             OpenOptions::new()
+                .create(true)
+                .truncate(false)
                 .write(true)
-                .create_new(true)
-                .open(&marker)
-        };
-        if let Err(e) = claim() {
-            let stale = e.kind() == ErrorKind::AlreadyExists
-                && fs::metadata(&marker)
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > delay * 2));
-            if !stale {
-                return if e.kind() == ErrorKind::AlreadyExists {
-                    Ok(())
-                } else {
-                    io(Err(e), &marker)
-                };
-            }
-            io(fs::remove_file(&marker), &marker)?;
-            io(claim(), &marker)?;
+                .open(&marker),
+            &marker,
+        )?;
+        match file.try_lock() {
+            Ok(()) => drop(file),
+            Err(TryLockError::WouldBlock) => return Ok(()),
+            Err(TryLockError::Error(e)) => return io(Err(e), &marker),
         }
-        let spawned = Command::new("sh")
-            .args(["-c", COMMITTER, "sh"])
-            .arg(delay.as_secs().to_string())
-            .arg(&marker)
-            .arg(&self.root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .process_group(0)
-            .spawn();
-        match spawned {
-            // Not waited on: it must outlive brain, and init reaps it.
-            Ok(child) => drop(child),
-            Err(e) => {
-                let _ = fs::remove_file(&marker);
-                return Err(Error::Command {
-                    cmd: "sh".to_owned(),
-                    detail: e.to_string(),
-                });
+        let exe = io(std::env::current_exe(), Path::new("brain"))?;
+        let mut tries = Vec::new();
+        if std::env::var_os("INVOCATION_ID").is_some() {
+            let mut c = Command::new("systemd-run");
+            c.args(["--user", "--scope", "--quiet", "--collect"])
+                .arg(&exe);
+            tries.push(c);
+        }
+        tries.push(Command::new(&exe));
+        let mut last = String::new();
+        for mut cmd in tries {
+            match handshake(cmd.env(COMMITTER_ENV, &self.root)) {
+                Ok(()) => {
+                    self.dirty.set(false);
+                    return Ok(());
+                }
+                Err(e) => last = e,
             }
         }
-        self.dirty.set(false);
-        Ok(())
+        Err(Error::Command {
+            cmd: "brain committer".to_owned(),
+            detail: last,
+        })
     }
+}
+
+/// Starts the committer detached, and returns once it holds the marker (or found it held).
+fn handshake(cmd: &mut Command) -> Result<(), String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = BufReader::new(out).read_line(&mut line);
+    }
+    // Not waited on: it must outlive brain, and init reaps it.
+    drop(child);
+    match line.trim() {
+        "ok" | "busy" => Ok(()),
+        _ => Err("no handshake".to_owned()),
+    }
+}
+
+/// The committer: `brain` with `BRAIN_COMMIT=<vault>`. See [`Vault::commit_later`].
+pub fn run_committer(root: &Path) -> Result<()> {
+    let marker = root.join(MARKER);
+    let file = io(
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&marker),
+        &marker,
+    )?;
+    let mut out = std::io::stdout();
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return io(writeln!(out, "busy").and_then(|()| out.flush()), &marker);
+        }
+        Err(TryLockError::Error(e)) => return io(Err(e), &marker),
+    }
+    io(writeln!(out, "ok").and_then(|()| out.flush()), &marker)?;
+    std::thread::sleep(commit_delay());
+    // Vault lock before the marker unlock: there is no moment when neither is held, and a
+    // write that found the marker held landed before the `git add` below.
+    let _lock = lock(root)?;
+    io(file.unlock(), &marker)?;
+    git(root, &["add", "-A"])?;
+    if git(root, &["diff", "--cached", "--name-only"])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(());
+    }
+    git(
+        root,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "brain: autosave",
+        ],
+    )
+    .map(drop)
+}
+
+/// The vault lock: an exclusive `flock` on the root directory, released on drop.
+fn lock(root: &Path) -> Result<File> {
+    let dir = io(File::open(root), root)?;
+    io(dir.lock(), root)?;
+    Ok(dir)
 }
 
 /// `BRAIN_COMMIT_DELAY` seconds, for tests; 60 otherwise.

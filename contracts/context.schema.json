@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/context.schema.json",
+  "version": 1,
   "title": "C15 context",
   "description": "~/.local/state/context.json: the current timezone and place. The last writer wins.",
   "type": "object",
@@ -11,7 +12,11 @@
     },
     "place": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^[^·\\r\\n]+$",
+      "not": {
+        "const": "-"
+      },
+      "description": "One field of a C3 heading: one line, no ' · ', and '-' is reserved for unknown."
     },
     "updated_at": {
       "type": "string",

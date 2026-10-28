@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/kinds/meeting.schema.json",
+  "version": 1,
   "title": "C1 doc: meeting",
   "description": "A meeting you marked. Attendees and project are page slugs. Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
   "type": "object",

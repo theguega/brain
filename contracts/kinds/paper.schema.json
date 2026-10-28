@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/kinds/paper.schema.json",
+  "version": 1,
   "title": "C1 doc: paper",
   "description": "A research paper. Filled by arXiv, the HF Hub (githubRepo, projectPage), alphaXiv and Papers with Code (tldr, lineage). Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
   "type": "object",

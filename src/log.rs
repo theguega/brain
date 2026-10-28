@@ -25,7 +25,8 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// The first line of `text` is the title, the rest the body.
+    /// The first line of `text` is the title, the rest the body. A body line that would
+    /// read as a block heading gets a leading backslash: it renders the same and parses as text.
     pub fn new(now: Now, source: Slug, text: &str) -> Result<Self> {
         let text = text.trim();
         let (title, body) = text.split_once('\n').unwrap_or((text, ""));
@@ -38,7 +39,18 @@ impl Entry {
             place: now.place,
             source,
             title: title.trim().to_owned(),
-            body: body.trim().to_owned(),
+            body: body
+                .trim()
+                .lines()
+                .map(|l| {
+                    if is_heading(l) {
+                        format!("\\{l}")
+                    } else {
+                        l.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         })
     }
 
@@ -57,6 +69,9 @@ impl Entry {
         let mut f = line.strip_prefix("## ")?.splitn(5, SEP);
         let (at, tz, place, source, title) =
             (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+        if !is_time(at) || tz.contains(' ') || title.is_empty() {
+            return None;
+        }
         Some(Self {
             at: at.to_owned(),
             tz: tz.to_owned(),
@@ -72,6 +87,25 @@ impl Entry {
     pub fn file(&self) -> PathBuf {
         Path::new("log").join(format!("{}.md", self.at.get(..10).unwrap_or(&self.at)))
     }
+}
+
+/// A line that opens a block: `## <time> · ` and so on.
+#[must_use]
+pub fn is_heading(line: &str) -> bool {
+    Entry::parse_heading(line).is_some()
+}
+
+/// `YYYY-MM-DDTHH:MM:SS±HH:MM`
+fn is_time(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 25
+        && b.iter().enumerate().all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 | 22 => *c == b':',
+            19 => *c == b'+' || *c == b'-',
+            _ => c.is_ascii_digit(),
+        })
 }
 
 /// Appends the block to its day's file and returns that file, relative to the vault.

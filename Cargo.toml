@@ -2,7 +2,7 @@
 name = "brain"
 version = "0.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Brain: the personal knowledge layer. Vault files, a rebuildable index, one CLI, one agent skill."
 license = "MIT"
 repository = "https://github.com/theguega/paperdb"

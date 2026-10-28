@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/page.schema.json",
+  "version": 1,
   "title": "C2 page frontmatter",
   "description": "The YAML frontmatter of pages/<slug>.md, as JSON. links holds one {rel: target} pair per item, written by `brain link`.",
   "type": "object",
@@ -56,6 +57,14 @@
           "minLength": 1
         }
       }
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Other names; an exact match in `find` goes straight to the page."
     }
   },
   "required": [

@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/profile.schema.json",
+  "version": 1,
   "title": "C5 profile",
   "description": "profile.md as printed by `brain --json`: at most 400 tokens, about 1600 characters.",
   "type": "object",

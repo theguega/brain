@@ -10,7 +10,7 @@ use brain::doc::Tag;
 use brain::ingest::{self, AddOpts, Added};
 use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
-use brain::{DocId, Rel, Result, Slug, Vault, lint, page, time};
+use brain::{Rel, Result, Slug, Vault, lint, page, time, vault};
 
 /// brain: the knowledge layer. A vault of plain files in a local git repo, and one CLI.
 ///
@@ -96,6 +96,12 @@ enum Reply {
 }
 
 fn main() -> ExitCode {
+    if let Some(root) = std::env::var_os(vault::COMMITTER_ENV) {
+        return match vault::run_committer(Path::new(&root)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
     let cli = Cli::parse();
     match run(&cli) {
@@ -136,6 +142,15 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
         return run_lint(&Vault::open(&root)?);
     }
     let vault = Vault::open_or_create(&root)?;
+    let reply = write(&vault, cmd);
+    // Also after a failure: whatever was written before it still gets committed.
+    if let Err(e) = vault.commit_later() {
+        eprintln!("warning: the vault will not autocommit: {e}");
+    }
+    reply
+}
+
+fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
     let reply = match cmd {
         Cmd::Add {
             source,
@@ -148,21 +163,21 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
                 why: why.clone(),
                 tags: tags.clone(),
             };
-            added(ingest::add(&vault, source, &opts)?)
+            added(ingest::add(vault, source, &opts)?)
         }
         Cmd::Log { text, source } => {
             let entry = Entry::new(time::now()?, source.clone(), text)?;
-            let file = log::append(&vault, &entry)?;
+            let file = log::append(vault, &entry)?;
             Reply::Fields(vec![("at", json!(entry.at)), ("file", json!(file))])
         }
         Cmd::Label { id, verdict } => {
             let id = match verdict {
-                Verdict::Like => warn(ingest::add(&vault, id, &AddOpts::default())?).id,
-                Verdict::Skip | Verdict::Later => DocId::parse(id)?,
+                Verdict::Like => warn(ingest::add(vault, id, &AddOpts::default())?).id,
+                Verdict::Skip | Verdict::Later => ingest::resolve(id)?,
             };
             let ts = time::now()?.at;
             label::append(
-                &vault,
+                vault,
                 &Label {
                     id: id.clone(),
                     verdict: *verdict,
@@ -173,21 +188,18 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
             Reply::Fields(vec![("id", json!(id)), ("verdict", json!(verdict))])
         }
         Cmd::Link { a, b, rel } => {
-            let dst = DocId::parse(b)
+            let dst = ingest::resolve(b)
                 .map(|d| d.to_string())
                 .or_else(|_| Slug::parse(b).map(|s| s.to_string()))?;
             let what = format!("{a} {rel} {dst}");
-            if page::link(&vault, a, &dst, rel)? {
+            if page::link(vault, a, &dst, rel)? {
                 Reply::Fields(vec![("link", json!(what))])
             } else {
                 Reply::Fields(vec![("noop", json!(format!("{what} already there")))])
             }
         }
-        Cmd::Lint => return run_lint(&vault),
+        Cmd::Lint => return run_lint(vault),
     };
-    if let Err(e) = vault.commit_later() {
-        eprintln!("warning: the vault will not autocommit: {e}");
-    }
     Ok((reply, ExitCode::SUCCESS))
 }
 
@@ -214,7 +226,9 @@ fn added(a: Added) -> Reply {
         format!("fill them in {}, then run brain lint", a.meta.display())
     };
     let mut fields = vec![("id", json!(a.id))];
-    if !a.created {
+    if a.text_added {
+        fields.push(("text", json!("added")));
+    } else if !a.created {
         fields.push(("noop", json!("already in the vault")));
     }
     fields.push(("missing", json!(missing)));

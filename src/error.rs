@@ -29,6 +29,8 @@ pub enum Error {
         line: usize,
         why: String,
     },
+    #[error("{}: {why}", path.display())]
+    Invalid { path: PathBuf, why: String },
     #[error("`{cmd}` failed: {detail}")]
     Command { cmd: String, detail: String },
     /// `curl` itself failed: not installed, DNS, TLS, timeout.
@@ -89,7 +91,7 @@ impl Error {
             }
             Self::NoVault(p) => format!("run `brain --vault {}` to create it", p.display()),
             Self::NoPage(slug) => format!("create pages/{slug}.md, then run `brain lint`"),
-            Self::Frontmatter { .. } | Self::Json { .. } => {
+            Self::Frontmatter { .. } | Self::Invalid { .. } | Self::Json { .. } => {
                 "fix the file, then run `brain lint`".to_owned()
             }
             Self::Network { .. } | Self::Http { .. } => "retry later".to_owned(),

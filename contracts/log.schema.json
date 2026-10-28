@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/log.schema.json",
+  "version": 1,
   "title": "C3 log block",
   "description": "One block of log/YYYY-MM-DD.md, parsed. The heading is `## <at> · <tz> · <place> · <source> · <title>`, with '-' for an unknown place.",
   "type": "object",
@@ -14,11 +15,19 @@
       "pattern": "^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$"
     },
     "place": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "minLength": 1
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[^·\\r\\n]+$",
+          "not": {
+            "const": "-"
+          },
+          "description": "One field of a C3 heading: one line, no ' · ', and '-' is reserved for unknown."
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "source": {
       "type": "string",
@@ -26,10 +35,14 @@
     },
     "title": {
       "type": "string",
-      "minLength": 1
+      "pattern": "^[^\\r\\n]+$"
     },
     "body": {
-      "type": "string"
+      "type": "string",
+      "description": "A line that reads as a block heading is stored with a leading backslash.",
+      "not": {
+        "pattern": "(^|\\n)## [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2} · "
+      }
     }
   },
   "required": [

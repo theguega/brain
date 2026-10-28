@@ -15,6 +15,9 @@ use crate::time::{self, Now};
 use crate::vault::{Vault, read_json};
 use crate::{alphaxiv, arxiv, hub, net, page, pwc};
 
+/// Set by brain, never by a file's frontmatter: the envelope of every doc.
+const ENVELOPE: &[&str] = &["id", "kind", "taint", "added", "tags", "why", "source"];
+
 /// Hosts whose URLs name an arXiv paper.
 const PAPER_HOSTS: &[&str] = &[
     "arxiv.org",
@@ -39,8 +42,28 @@ pub struct Added {
     pub missing: Vec<Problem>,
     /// `docs/<dir>/meta.json`, relative to the vault.
     pub meta: PathBuf,
+    /// A later add fetched the text an earlier one could not.
+    pub text_added: bool,
     /// Enrichment that failed without failing the add.
     pub warnings: Vec<String>,
+}
+
+/// The id `add` would give an id or URL, without fetching anything.
+pub fn resolve(input: &str) -> Result<DocId> {
+    match web_url(input) {
+        Some(url) => DocId::web(url).ok_or_else(|| Error::BadRef(input.to_owned())),
+        None => DocId::parse(input),
+    }
+}
+
+/// `Some` for an http(s) URL that does not name an arXiv paper.
+fn web_url(input: &str) -> Option<&str> {
+    let rest = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    (!PAPER_HOSTS.contains(&host)).then_some(input)
 }
 
 pub fn add(vault: &Vault, input: &str, opts: &AddOpts) -> Result<Added> {
@@ -48,26 +71,37 @@ pub fn add(vault: &Vault, input: &str, opts: &AddOpts) -> Result<Added> {
     if path.is_file() {
         return add_file(vault, path, opts);
     }
-    if let Some(rest) = input
-        .strip_prefix("https://")
-        .or_else(|| input.strip_prefix("http://"))
-    {
-        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        let host = host.strip_prefix("www.").unwrap_or(host);
-        if !PAPER_HOSTS.contains(&host) {
-            return add_web(vault, input, opts);
-        }
+    if let Some(url) = web_url(input) {
+        return add_web(vault, url, opts);
     }
     let id = DocId::parse(input)?;
-    if vault.has_doc(&id) {
-        return existing(vault, id);
-    }
     match id {
+        DocId::Arxiv(aid) if vault.has_doc(&id) => retry_text(vault, &aid),
+        _ if vault.has_doc(&id) => existing(vault, id),
         DocId::Arxiv(aid) => add_paper(vault, &aid, opts),
         other => Err(Error::Usage(format!(
             "{other} is not in the vault; add it by its URL or file"
         ))),
     }
+}
+
+/// A paper already in the vault: fetch its text if an earlier add could not.
+fn retry_text(vault: &Vault, aid: &ArxivId) -> Result<Added> {
+    let id = DocId::Arxiv(aid.clone());
+    let text = Vault::doc_dir(&id).join("text.md");
+    let mut added = existing(vault, id)?;
+    if vault.path(&text).is_file() {
+        return Ok(added);
+    }
+    match paper_text(aid) {
+        Ok(Some(t)) => {
+            vault.write(&text, &t)?;
+            added.text_added = true;
+        }
+        Ok(None) => {}
+        Err(e) => added.warnings.push(format!("no text: {e}")),
+    }
+    Ok(added)
 }
 
 fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
@@ -266,6 +300,12 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
             _ => (s, Fields::new()),
         }
     };
+    if let Some(key) = ENVELOPE.iter().find(|k| fields.contains_key(**k)) {
+        return Err(Error::Invalid {
+            path: name.into(),
+            why: format!("frontmatter sets `{key}`, which brain sets (use --kind, --tag, --why)"),
+        });
+    }
     let title = match fields.remove("title") {
         Some(Value::String(t)) if !t.is_empty() => t,
         _ if html => html_title(&text),
@@ -299,7 +339,7 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
     if vault.has_doc(&id) {
         return existing(vault, id);
     }
-    let source = Some(name);
+    let source = Some(name.clone());
     match kind {
         Kind::ARTIFACT => {
             let body = Artifact {
@@ -330,6 +370,12 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
                 title: Some(title),
                 attendees,
             };
+            if let Some(key) = fields.keys().next() {
+                return Err(Error::Invalid {
+                    path: name.into(),
+                    why: format!("frontmatter `{key}` is not meeting metadata"),
+                });
+            }
             write(
                 vault,
                 &envelope(id, kind, opts, &now, source, body),
@@ -392,6 +438,7 @@ fn existing(vault: &Vault, id: DocId) -> Result<Added> {
         created: false,
         missing,
         meta,
+        text_added: false,
         warnings: Vec::new(),
     })
 }

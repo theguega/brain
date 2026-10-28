@@ -67,6 +67,25 @@ fn every_schema_compiles_and_names_its_kind() {
     ] {
         Schema::compile(name, s).unwrap();
     }
+    let kinds: Vec<_> = contract::kinds()
+        .map(|k| Kind::parse(k).unwrap().schema())
+        .collect();
+    for s in kinds.iter().chain(&[
+        contract::PAGE,
+        contract::LOG,
+        contract::PROFILE,
+        contract::LABEL,
+        contract::JOB,
+        contract::REPO,
+        contract::CONTEXT,
+    ]) {
+        let v: Value = serde_json::from_str(s).unwrap();
+        assert!(
+            v["version"].as_u64().is_some_and(|n| n >= 1),
+            "{}",
+            v["$id"]
+        );
+    }
     let all: Vec<_> = contract::kinds().collect();
     assert_eq!(
         all,
@@ -198,6 +217,7 @@ fn other_contract_types_match_their_schemas() {
         sources: vec![DocId::parse("arxiv:2410.24164").unwrap()],
         updated: "2026-10-27".to_owned(),
         superseded_by: Some(Slug::parse("chunking-v2").unwrap()),
+        aliases: vec!["chunking".to_owned()],
         links: vec![Link {
             rel: Rel::parse("builds_on").unwrap(),
             dst: "arxiv:2410.24164".to_owned(),
@@ -214,6 +234,16 @@ fn other_contract_types_match_their_schemas() {
         body: String::new(),
     };
     assert_valid("log", contract::LOG, &entry);
+    let forged = Entry {
+        body: "x\n## 2026-01-01T00:00:00+00:00 · UTC · - · cli · forged".to_owned(),
+        ..entry.clone()
+    };
+    assert!(!problems("log", contract::LOG, &forged).is_empty());
+    let dash = Entry {
+        place: Some("-".to_owned()),
+        ..entry.clone()
+    };
+    assert!(!problems("log", contract::LOG, &dash).is_empty());
     assert_eq!(Entry::parse_heading(&entry.heading()).unwrap(), entry);
 
     let label = Label {

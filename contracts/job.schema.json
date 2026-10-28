@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://brain.local/contracts/job.schema.json",
+  "version": 1,
   "title": "C10 job line",
   "description": "One line of jobs.jsonl, appended by every job run and every tick.",
   "type": "object",
