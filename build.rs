@@ -1,8 +1,17 @@
-//! Embeds every `contracts/kinds/<kind>.schema.json`, so adding a kind is a file and a rebuild.
+//! Embeds every `contracts/kinds/<kind>.schema.json`, so adding a kind is a file and a rebuild,
+//! and stamps the build with the brain git commit (`BRAIN_GIT`) that `brain eval` records.
 
 use std::fmt::Write as _;
 use std::path::Path;
+use std::process::Command;
 use std::{env, fs};
+
+fn git(args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo::rerun-if-changed=contracts/kinds");
@@ -14,6 +23,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     kinds.sort();
+    // Rebuild when the commit moves or the source changes (`--dirty` tracks the latter).
+    println!("cargo::rerun-if-changed=src");
+    for r in ["HEAD", "refs"] {
+        if let Some(p) = git(&["rev-parse", "--git-path", r]) {
+            println!("cargo::rerun-if-changed={p}");
+        }
+    }
+    let commit =
+        git(&["describe", "--always", "--dirty", "--abbrev=12"]).unwrap_or("unknown".into());
+    println!("cargo::rustc-env=BRAIN_GIT={commit}");
     let mut out = String::from("pub(crate) const KINDS: &[(&str, &str)] = &[\n");
     for k in &kinds {
         writeln!(

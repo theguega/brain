@@ -18,6 +18,8 @@ use brain::{Error, Rel, Result, Slug, Vault, lint, page, time, vault, wiki};
 
 mod wiki_cli;
 
+mod ops;
+
 /// brain: the knowledge layer. A vault of plain files in a local git repo, and one CLI.
 ///
 /// Bare `brain` prints the profile. Lists print as `name[shown/total]{columns}:` with the
@@ -146,6 +148,8 @@ enum Cmd {
         #[arg(long)]
         full: bool,
     },
+    #[command(flatten)]
+    Ops(ops::Ops),
 }
 
 fn day_parser(s: &str) -> std::result::Result<String, String> {
@@ -227,6 +231,9 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
         };
         return Ok((reply, ExitCode::SUCCESS));
     };
+    if let Cmd::Ops(o) = cmd {
+        return ops::run(&root, o);
+    }
     if let Some(reply) = read(&root, cmd)? {
         return Ok((reply, ExitCode::SUCCESS));
     }
@@ -434,6 +441,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
         | Cmd::Code { .. }
         | Cmd::Pages { .. }
         | Cmd::Reindex { .. }
+        | Cmd::Ops(_)
         | Cmd::Wiki { .. } => {
             return Err(Error::Usage("not a write command".to_owned()));
         }
