@@ -160,10 +160,18 @@ impl Vault {
     /// says `ok`, sleeps for the delay, takes the vault lock, unlocks the marker, then
     /// commits everything pending. A write that finds the marker locked is picked up by that
     /// commit, because the unlock comes before `git add`. So commits are at least a delay apart.
-    /// Under systemd (`INVOCATION_ID` is set) the committer starts in its own transient
-    /// scope through `systemd-run --user --scope`, so it outlives the unit that wrote.
+    ///
+    /// Inside a systemd unit (`INVOCATION_ID` is set) a detached child would die with the
+    /// unit, so this commits now instead, under the vault lock. The tick runs every
+    /// 15 minutes, so that still makes at most one commit a minute.
     pub fn commit_later(&self) -> Result<()> {
         if !self.dirty.get() {
+            return Ok(());
+        }
+        if std::env::var_os("INVOCATION_ID").is_some() {
+            let _lock = lock(&self.root)?;
+            commit(&self.root)?;
+            self.dirty.set(false);
             return Ok(());
         }
         let marker = self.root.join(MARKER);
@@ -181,28 +189,14 @@ impl Vault {
             Err(TryLockError::Error(e)) => return io(Err(e), &marker),
         }
         let exe = io(std::env::current_exe(), Path::new("brain"))?;
-        let mut tries = Vec::new();
-        if std::env::var_os("INVOCATION_ID").is_some() {
-            let mut c = Command::new("systemd-run");
-            c.args(["--user", "--scope", "--quiet", "--collect"])
-                .arg(&exe);
-            tries.push(c);
-        }
-        tries.push(Command::new(&exe));
-        let mut last = String::new();
-        for mut cmd in tries {
-            match handshake(cmd.env(COMMITTER_ENV, &self.root)) {
-                Ok(()) => {
-                    self.dirty.set(false);
-                    return Ok(());
-                }
-                Err(e) => last = e,
+        handshake(Command::new(exe).env(COMMITTER_ENV, &self.root)).map_err(|detail| {
+            Error::Command {
+                cmd: "brain committer".to_owned(),
+                detail,
             }
-        }
-        Err(Error::Command {
-            cmd: "brain committer".to_owned(),
-            detail: last,
-        })
+        })?;
+        self.dirty.set(false);
+        Ok(())
     }
 }
 
@@ -252,6 +246,11 @@ pub fn run_committer(root: &Path) -> Result<()> {
     // write that found the marker held landed before the `git add` below.
     let _lock = lock(root)?;
     io(file.unlock(), &marker)?;
+    commit(root)
+}
+
+/// Commits everything pending, if anything is. The caller holds the vault lock.
+fn commit(root: &Path) -> Result<()> {
     git(root, &["add", "-A"])?;
     if git(root, &["diff", "--cached", "--name-only"])?
         .trim()

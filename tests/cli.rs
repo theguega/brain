@@ -593,12 +593,13 @@ fn a_command_that_fails_after_writing_still_commits() {
 
 #[test]
 #[ignore = "needs a systemd user manager"]
-fn the_committer_outlives_a_systemd_unit() {
+fn inside_a_systemd_unit_writes_commit_before_exit() {
     let env = Env::new(None);
     env.ok(&[]);
     let mut c = Command::new("systemd-run");
     c.args(["--user", "--wait", "--collect", "--quiet"]);
-    for (k, v) in env.cmd("2").get_envs() {
+    // A long delay: only the synchronous commit can land before the unit ends.
+    for (k, v) in env.cmd("600").get_envs() {
         if let Some(v) = v {
             c.arg(format!(
                 "--setenv={}={}",
@@ -613,12 +614,7 @@ fn the_committer_outlives_a_systemd_unit() {
         .status()
         .unwrap();
     assert!(status.success());
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(
-        env.pending(),
-        "the committer is still waiting after its unit stopped"
-    );
-    env.settle();
+    assert!(!env.pending(), "no committer is left behind");
     assert_eq!(env.git(&["log", "-1", "--format=%s"]), "brain: autosave\n");
     assert_eq!(env.git(&["status", "--porcelain"]), "");
 }
