@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 /// Every fallible path in the crate. Each variant is a real boundary:
-/// file I/O, JSON on disk or on the wire, SQLite, an external command, HTTP, user input.
+/// file I/O, JSON on disk or on the wire, an external command, HTTP, user input.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -23,8 +23,14 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
-    #[error("index: {0}")]
-    Sql(#[from] rusqlite::Error),
+    #[error("{}:{line}: {why}", path.display())]
+    Frontmatter {
+        path: PathBuf,
+        line: usize,
+        why: String,
+    },
+    #[error("{}: {why}", path.display())]
+    Invalid { path: PathBuf, why: String },
     #[error("`{cmd}` failed: {detail}")]
     Command { cmd: String, detail: String },
     /// `curl` itself failed: not installed, DNS, TLS, timeout.
@@ -32,34 +38,65 @@ pub enum Error {
     Network { url: String, detail: String },
     #[error("HTTP {status} from {url}")]
     Http { url: String, status: u16 },
-    #[error("not a paper reference: {0:?} (want an arXiv id or URL, or a lowercase slug)")]
+    #[error("not an id or source: {0:?}")]
     BadRef(String),
     #[error("not a tag: {0:?} (lowercase letters, digits, '-')")]
     BadTag(String),
-    #[error("no paper {0} in the library")]
-    NotFound(String),
+    #[error("not a kind: {0:?}")]
+    BadKind(String),
+    #[error("not a rel: {0:?} (lowercase letters, digits, '_')")]
+    BadRel(String),
+    #[error("unknown timezone {0:?}")]
+    BadTz(String),
+    #[error("no vault at {}", .0.display())]
+    NoVault(PathBuf),
+    #[error("no page {0:?}")]
+    NoPage(String),
     #[error("{0} is on neither arXiv nor the Hugging Face Hub")]
     Unknown(String),
     #[error("no text for {id}: {why}")]
     NoText { id: String, why: String },
-    #[error("no library at {} (run `brain init`, or set PAPERDB_LIBRARY)", .0.display())]
-    NoLibrary(PathBuf),
-    #[error("{failed} of {total} not added (errors above)")]
-    Partial { failed: usize, total: usize },
     #[error("{0}")]
     Usage(String),
 }
 
 impl Error {
-    /// Process exit code, so a caller can tell "fix the command" from "retry later":
-    /// 2 bad usage, 3 not in the library, 4 network, 1 anything else.
+    /// 2 when the command itself is wrong, 1 for everything else.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::Usage(_) | Self::BadRef(_) | Self::BadTag(_) | Self::NoLibrary(_) => 2,
-            Self::NotFound(_) => 3,
-            Self::Http { .. } | Self::Network { .. } => 4,
+            Self::BadRef(_)
+            | Self::BadTag(_)
+            | Self::BadKind(_)
+            | Self::BadRel(_)
+            | Self::Usage(_) => 2,
             _ => 1,
+        }
+    }
+
+    /// The command to try next, printed after `error:`.
+    #[must_use]
+    pub fn next(&self) -> String {
+        match self {
+            Self::BadRef(_) => {
+                "pass an arXiv id or URL, a web URL, a file path, or an id like web:<slug>"
+                    .to_owned()
+            }
+            Self::BadKind(_) => format!(
+                "use one of: {}",
+                crate::contract::kinds().collect::<Vec<_>>().join(", ")
+            ),
+            Self::BadTz(_) => {
+                "fix tz in ~/.local/state/context.json (an IANA name like Europe/Paris)".to_owned()
+            }
+            Self::NoVault(p) => format!("run `brain --vault {}` to create it", p.display()),
+            Self::NoPage(slug) => format!("create pages/{slug}.md, then run `brain lint`"),
+            Self::Frontmatter { .. } | Self::Invalid { .. } | Self::Json { .. } => {
+                "fix the file, then run `brain lint`".to_owned()
+            }
+            Self::Network { .. } | Self::Http { .. } => "retry later".to_owned(),
+            Self::Unknown(_) => "check the id on arxiv.org".to_owned(),
+            _ => "brain --help".to_owned(),
         }
     }
 }

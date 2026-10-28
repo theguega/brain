@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brain.local/contracts/kinds/blog.schema.json",
+  "version": 1,
+  "title": "C1 doc: blog",
+  "description": "A blog post or web article. Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
+    },
+    "kind": {
+      "const": "blog"
+    },
+    "taint": {
+      "enum": [
+        "own",
+        "external"
+      ]
+    },
+    "added": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+      }
+    },
+    "why": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^(/|~)"
+      }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https?://"
+    },
+    "site": {
+      "type": "string",
+      "minLength": 1
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "taint",
+    "added",
+    "title",
+    "url",
+    "site",
+    "date"
+  ],
+  "additionalProperties": false
+}
