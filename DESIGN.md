@@ -82,13 +82,15 @@ Each kind is a JSON Schema in `contracts/kinds/<kind>.schema.json`. Adding a kin
 
 | Kind | Required metadata | Filled by |
 |---|---|---|
-| paper | title, authors, date, venue?, `links{code, project, hf, openreview, video}` | arXiv, HF Hub (`githubRepo`, `projectPage`), alphaXiv |
+| paper | title, authors, date, venue?, `links{code, project, hf, openreview, video}` | arXiv, HF Hub (`githubRepo`, `projectPage`), alphaXiv, Papers with Code (`tldr`, lineage) |
 | book · course | title, authors, year, `links{home}` | you, or the PDF's metadata |
 | blog · news | title, url, site, date | page metadata (Jina Reader) |
 | talk | title, speakers, date, `links{video, slides}` | you |
 | note | title | you |
 | artifact | title, why, source, captured_at | `brain add page.html --kind artifact --why` |
 | meeting | started_at, tz, place, attendees[] → pages, project? | you, by paste or file |
+
+**Lineage.** For papers, `add` also reads Papers with Code (`paperswithcode.co/api/v1/papers/<arxiv>/`) and stores its `predecessor_papers` and `successor_papers` as links with `rel: builds_on`, whether or not the other paper is in the library. Compile uses them to order a concept page's history (π0 → π0.5) instead of guessing it. PwC's code links, tasks and methods are not used: on π0 they are empty, too coarse, or wrong. If PwC is down, the paper just has no lineage yet, and the next `reindex` retries.
 
 Missing optional fields are fine. A missing required field is a `lint` error, and `add` reports it on the spot.
 
@@ -269,7 +271,7 @@ cursors(source PK, cursor, ok_at)
 
 Each item records its `bucket`. Items not shown carry over. Items expire after 21 days, and a `later` comes back after 7.
 
-**Summaries:** HF `ai_summary` or the S2 tldr when present. Otherwise the free-tier LLM writes the 5-field card for the selected items only, and only for kinds paper, rss and news (F6). A failure is recorded as `summary: failed`.
+**Summaries:** HF `ai_summary`, the Papers with Code `tldr` or the S2 tldr when present. Otherwise the free-tier LLM writes the 5-field card for the selected items only, and only for kinds paper, rss and news (F6). A failure is recorded as `summary: failed`.
 
 **Output:** the day's selection is written to `pool.db`, then one Web Push goes out with the count (F9).
 

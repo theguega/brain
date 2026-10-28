@@ -29,7 +29,7 @@ The knowledge layer: vault files, a rebuildable index, one CLI and one skill. Bu
 | ID | Level | Requirement | Acceptance check |
 |---|---|---|---|
 | B1 | MUST | `brain reindex` rebuilds `index.db` from `~/brain` alone. Files win over the database. | Golden test: delete the db, reindex, and `find` returns identical results. |
-| B2 | MUST | `brain add <arxiv\|url\|pdf\|file> [--kind]` is idempotent and fills the C1 required metadata from arXiv, HF Hub (`githubRepo`, `projectPage`) and alphaXiv. | Adding the same arXiv id twice changes nothing; π0 gets its code and project links. |
+| B2 | MUST | `brain add <arxiv\|url\|pdf\|file> [--kind]` is idempotent and fills the C1 required metadata from arXiv, HF Hub (`githubRepo`, `projectPage`) and alphaXiv, plus paper lineage (`builds_on` links) and `tldr` from Papers with Code. | Adding the same arXiv id twice changes nothing; π0 gets its code and project links, and a `builds_on` link to π0.5. |
 | B3 | MUST | `brain find <q>` is hybrid search: BM25 plus vectors fused with RRF at k=60. Default 8 rows, each ≤160 chars of clean snippet. Filters: `--kind --since --repo`. | Output follows C4. No highlight markup or broken tables in snippets. |
 | B4 | MUST | `brain get <id>[#span]` returns at most 1000 chars by default, with `--full` for everything. | A span by heading or chunk number returns only that section. |
 | B5 | MUST | Text from external sources is stored with `taint: external`, and `find`/`get` print it fenced as data. | An injected instruction in a stored abstract appears inside the fence, never as a bare line. |
@@ -63,7 +63,7 @@ Daily paper and news candidates you like or skip. Replaces weekly-papers and `pa
 | F3 | MUST | Dedupe on the arXiv id without its version, then on the normalized title. Papers already in the library or already labeled are excluded. | A paper on both HF and arXiv appears once. |
 | F4 | MUST | Phase A (2 weeks): rank by S2 order plus HF upvotes and log the like-rate. Phase B: PU logistic regression on local embeddings (positives: library; negatives: skips; background: unlabeled), retrained nightly, with time-split AUC logged. | The like-rate of each phase is visible in the weekly review. |
 | F5 | MUST | Daily selection from the unshown pool: top 15 + 3 nearest the decision boundary + 2 trending. Counts are configurable. | Each item carries its `bucket` (top, explore or trending). |
-| F6 | MUST | Summaries: HF `ai_summary` or the S2 tldr first; a free-tier LLM writes 5-field cards for the selected items only. Failures are shown, never masked. The free tier is used only for kind ∈ {paper, rss}. | A forced LLM failure shows `summary: failed`, not the abstract. |
+| F6 | MUST | Summaries: HF `ai_summary`, the Papers with Code `tldr` or the S2 tldr first; a free-tier LLM writes 5-field cards for the selected items only. Failures are shown, never masked. The free tier is used only for kind ∈ {paper, rss}. | A forced LLM failure shows `summary: failed`, not the abstract. |
 | F7 | MUST | Labels via C7 from the dashboard or `feed like\|skip\|later <id>`. A like runs `brain add`. | A like shows up in `brain find` within a minute. |
 | F8 | MUST | Unshown items carry over and expire after 21 days with a decaying score. `later` re-surfaces an item after 7 days. | A high-scoring paper from a missed day appears the next day. |
 | F9 | SHOULD | One push per day with the count, never one per paper. | — |
