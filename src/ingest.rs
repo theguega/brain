@@ -1,8 +1,9 @@
-//! `brain add` (B2, B13, B14): a source becomes `docs/<id>/`. Idempotent: an id already
+//! `brain add` (B2, B13, B14): a source becomes `docs/<id>/`. Idempotent: a source already
 //! in the vault is left untouched.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -10,7 +11,7 @@ use serde_json::Value;
 use crate::contract::{Kind, Problem, Schema};
 use crate::doc::{Artifact, Doc, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
 use crate::error::{Error, Result, io};
-use crate::id::{ArxivId, DocId};
+use crate::id::{ArxivId, DocId, canonical_url};
 use crate::time::{self, Now};
 use crate::vault::{Vault, read_json};
 use crate::{alphaxiv, arxiv, hub, lineage, net, page, pwc};
@@ -49,11 +50,59 @@ pub struct Added {
 }
 
 /// The id `add` would give an id or URL, without fetching anything.
-pub fn resolve(input: &str) -> Result<DocId> {
+pub fn resolve(vault: &Vault, input: &str) -> Result<DocId> {
     match web_url(input) {
-        Some(url) => DocId::web(url).ok_or_else(|| Error::BadRef(input.to_owned())),
+        Some(url) => match web_slot(vault, url)? {
+            Slot::Held(id) | Slot::Free(id) => Ok(id),
+        },
         None => DocId::parse(input),
     }
+}
+
+/// Where a source lands: the doc that already holds it, or the free id it gets.
+enum Slot {
+    Held(DocId),
+    Free(DocId),
+}
+
+/// `id` unless another source holds it, then `hashed`. `legacy` is the id an older rule
+/// gave the same source; `same` says whether a doc in the vault holds this source.
+fn slot(
+    vault: &Vault,
+    legacy: Option<DocId>,
+    id: DocId,
+    hashed: Option<DocId>,
+    same: impl Fn(&DocId) -> Result<bool>,
+) -> Result<Slot> {
+    for c in legacy.iter().chain([&id]).chain(hashed.iter()) {
+        if vault.has_doc(c) && same(c)? {
+            return Ok(Slot::Held(c.clone()));
+        }
+    }
+    if !vault.has_doc(&id) {
+        return Ok(Slot::Free(id));
+    }
+    match hashed {
+        Some(h) if !vault.has_doc(&h) => Ok(Slot::Free(h)),
+        _ => Err(Error::Usage(format!(
+            "{id} and its hashed form are held by other docs"
+        ))),
+    }
+}
+
+/// A web URL's slot: the same URL means the same [`canonical_url`] in `meta.json`.
+fn web_slot(vault: &Vault, url: &str) -> Result<Slot> {
+    let canon = canonical_url(url);
+    let sha = sha256_bytes(canon.as_bytes())?;
+    let id = DocId::web_canonical(&canon, &sha).ok_or_else(|| Error::BadRef(url.to_owned()))?;
+    let same = |id: &DocId| {
+        let meta: Value = read_json(&vault.path(&Vault::doc_dir(id).join("meta.json")))?;
+        Ok(meta
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|u| canonical_url(u) == canon))
+    };
+    slot(vault, DocId::web(url), id.clone(), id.hashed(&sha), same)
 }
 
 /// `Some` for an http(s) URL that does not name an arXiv paper.
@@ -206,10 +255,10 @@ fn add_web(vault: &Vault, url: &str, opts: &AddOpts) -> Result<Added> {
             "a web URL adds as --kind blog or news".to_owned(),
         ));
     }
-    let id = DocId::web(url).ok_or_else(|| Error::BadRef(url.to_owned()))?;
-    if vault.has_doc(&id) {
-        return existing(vault, id);
-    }
+    let id = match web_slot(vault, url)? {
+        Slot::Held(id) => return existing(vault, id),
+        Slot::Free(id) => id,
+    };
     let page = read_page(url).ok_or_else(|| Error::NoText {
         id: id.to_string(),
         why: "the page reader was blocked".to_owned(),
@@ -300,7 +349,19 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
     };
 
     let id = match kind {
-        Kind::ARTIFACT => DocId::artifact(&title),
+        Kind::ARTIFACT => {
+            let sha = sha256_bytes(&bytes)?;
+            let id = DocId::artifact(&title, &sha).ok_or_else(|| Error::BadRef(name.clone()))?;
+            let same = |id: &DocId| {
+                let held = vault.read(&Vault::doc_dir(id).join(text_file))?;
+                Ok(held.as_deref() == Some(text.as_str()))
+            };
+            let hashed = id.hashed(&sha);
+            match slot(vault, DocId::artifact_legacy(&title), id, hashed, same)? {
+                Slot::Held(id) => return existing(vault, id),
+                Slot::Free(id) => Some(id),
+            }
+        }
         Kind::MEETING => {
             let started = fields
                 .get("started_at")
@@ -308,7 +369,7 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
                 .unwrap_or(&now.at);
             DocId::meeting(started.get(..10).unwrap_or(now.day()), &title)
         }
-        _ => DocId::file(&sha256(path)?),
+        _ => DocId::file(&sha256_bytes(&bytes)?),
     }
     .ok_or_else(|| Error::BadRef(name.clone()))?;
     if vault.has_doc(&id) {
@@ -469,11 +530,30 @@ pub fn pdf_to_text(pdf: &Path) -> Result<String, String> {
     ))
 }
 
-/// Hex SHA-256 of a file, by coreutils `sha256sum` or macOS `shasum`.
+/// Hex SHA-256 of a file.
 pub(crate) fn sha256(path: &Path) -> Result<String> {
+    sha256_bytes(&io(std::fs::read(path), path)?)
+}
+
+/// Hex SHA-256, by coreutils `sha256sum` or macOS `shasum` on stdin.
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> Result<String> {
+    let run = |bin: &str, args: &[&str]| -> std::io::Result<Output> {
+        let mut child = Command::new(bin)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Dropping stdin closes it, so the hasher sees the end.
+        child
+            .stdin
+            .take()
+            .map_or(Ok(()), |mut i| i.write_all(bytes))?;
+        child.wait_with_output()
+    };
     let mut last = String::new();
     for (bin, args) in [("sha256sum", &[][..]), ("shasum", &["-a", "256"][..])] {
-        match Command::new(bin).args(args).arg(path).output() {
+        match run(bin, args) {
             Ok(out) if out.status.success() => {
                 let s = String::from_utf8_lossy(&out.stdout);
                 return Ok(s.split_whitespace().next().unwrap_or_default().to_owned());
@@ -526,5 +606,62 @@ mod tests {
             "Brain & contracts"
         );
         assert_eq!(html_title("<p>none</p>"), "");
+    }
+
+    #[test]
+    fn web_urls_that_share_a_slug_get_their_own_docs() {
+        let dir = std::env::temp_dir().join(format!("brain-web-slot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let vault = Vault::open(&dir).unwrap();
+        let put = |id: &DocId, url: &str| {
+            let meta = Vault::doc_dir(id).join("meta.json");
+            vault
+                .write_json(&meta, &serde_json::json!({"url": url}))
+                .unwrap();
+        };
+        let land = |url: &str| match web_slot(&vault, url).unwrap() {
+            Slot::Free(id) => {
+                put(&id, url);
+                id
+            }
+            Slot::Held(id) => panic!("{url} is already {id}"),
+        };
+        let held = |url: &str| match web_slot(&vault, url).unwrap() {
+            Slot::Held(id) => id,
+            Slot::Free(id) => panic!("{url} would add {id}"),
+        };
+
+        let hn1 = land("https://news.ycombinator.com/item?id=1");
+        let hn2 = land("https://news.ycombinator.com/item?id=2");
+        assert_eq!(hn1.to_string(), "web:news-ycombinator-com-item-id-1");
+        assert_eq!(hn2.to_string(), "web:news-ycombinator-com-item-id-2");
+        assert_eq!(
+            held("https://news.ycombinator.com/item?id=1&utm_source=x#c"),
+            hn1
+        );
+        assert_eq!(held("http://www.news.ycombinator.com/item?id=2"), hn2);
+
+        let a = land("https://example.com/a-b");
+        let b = land("https://example.com/a_b");
+        assert_eq!(a.to_string(), "web:example-com-a-b");
+        assert!(
+            b.rest().starts_with("example-com-a-b-") && b.rest().len() == 22,
+            "{b}"
+        );
+        assert_eq!(held("https://example.com/a-b"), a);
+        assert_eq!(held("https://example.com/a_b"), b);
+
+        let old = DocId::parse("web:old-example-com-post").unwrap();
+        put(&old, "https://old.example.com/post?p=1");
+        assert_eq!(held("https://old.example.com/post?p=1"), old);
+
+        let long = format!("https://example.com/{}", "x".repeat(180));
+        assert_eq!(long.len(), 200);
+        let id = land(&long);
+        assert_eq!(id.rest().len(), 64);
+        assert_eq!(DocId::parse(&id.to_string()).unwrap(), id);
+        assert_eq!(held(&long), id);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

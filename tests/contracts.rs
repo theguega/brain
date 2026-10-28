@@ -218,6 +218,7 @@ fn other_contract_types_match_their_schemas() {
         updated: "2026-10-27".to_owned(),
         superseded_by: Some(Slug::parse("chunking-v2").unwrap()),
         aliases: vec!["chunking".to_owned()],
+        tags: vec!["robotics/policy".to_owned()],
         links: vec![Link {
             rel: Rel::parse("builds_on").unwrap(),
             dst: "arxiv:2410.24164".to_owned(),

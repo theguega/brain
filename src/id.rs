@@ -48,16 +48,27 @@ impl Slug {
     /// `None` if nothing is left.
     #[must_use]
     pub fn slugify(s: &str) -> Option<Self> {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars().flat_map(char::to_lowercase) {
-            if c.is_ascii_alphanumeric() {
-                out.push(c);
-            } else if !out.ends_with('-') && !out.is_empty() {
-                out.push('-');
-            }
+        let out = slug_chars(s);
+        Self::parse(out.get(..64).unwrap_or(&out).trim_end_matches('-')).ok()
+    }
+
+    /// [`Slug::slugify`], but a slug too long to keep whole is cut and ends in
+    /// `-<sha256[:6]>`, so two long names that share a start stay apart.
+    #[must_use]
+    pub fn slugify_or_hash(s: &str, sha256_hex: &str) -> Option<Self> {
+        let out = slug_chars(s);
+        if out.len() <= 64 {
+            Self::parse(&out).ok()
+        } else {
+            Self::hashed(&out, sha256_hex)
         }
-        let out = out.get(..64).unwrap_or(&out).trim_end_matches('-');
-        Self::parse(out).ok()
+    }
+
+    /// `base`, cut to fit, then `-<sha256[:6]>`.
+    fn hashed(base: &str, sha256_hex: &str) -> Option<Self> {
+        let tag = sha256_hex.get(..6)?.to_ascii_lowercase();
+        let base = base.get(..64 - 7).unwrap_or(base).trim_end_matches('-');
+        Self::parse(&format!("{base}-{tag}")).ok()
     }
 
     #[must_use]
@@ -114,13 +125,19 @@ impl DocId {
         Self::parse(&format!("{prefix}:{rest}"))
     }
 
-    /// `web:` id for a URL: host (without `www.`) and path, slugified.
+    /// `web:` id for a [`canonical_url`]: host (without `www.`), path and query, slugified.
+    /// A slug too long to keep whole ends in `-<sha256[:6]>` of the canonical URL.
+    #[must_use]
+    pub fn web_canonical(canonical: &str, sha256_hex: &str) -> Option<Self> {
+        Slug::slugify_or_hash(host_path(canonical), sha256_hex).map(Self::Web)
+    }
+
+    /// The `web:` id of the older rule that dropped the whole query. Docs added under it
+    /// keep it, and `add` still finds them by it.
     #[must_use]
     pub fn web(url: &str) -> Option<Self> {
-        let rest = url.split_once("://").map_or(url, |(_, r)| r);
-        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
-        let rest = rest.strip_prefix("www.").unwrap_or(rest);
-        Slug::slugify(rest).map(Self::Web)
+        let rest = host_path(url);
+        Slug::slugify(rest.split(['?', '#']).next().unwrap_or(rest)).map(Self::Web)
     }
 
     #[must_use]
@@ -135,9 +152,27 @@ impl DocId {
         Slug::slugify(&format!("{day} {title}")).map(Self::Meeting)
     }
 
+    /// `sha256_hex` of the HTML ends a title too long to keep whole.
     #[must_use]
-    pub fn artifact(title: &str) -> Option<Self> {
+    pub fn artifact(title: &str, sha256_hex: &str) -> Option<Self> {
+        Slug::slugify_or_hash(title, sha256_hex).map(Self::Artifact)
+    }
+
+    /// The `artifact:` id of the rule that cut long titles without a hash.
+    #[must_use]
+    pub fn artifact_legacy(title: &str) -> Option<Self> {
         Slug::slugify(title).map(Self::Artifact)
+    }
+
+    /// The id with `-<sha256[:6]>` appended, for a source whose id another doc holds.
+    /// `None` for ids that are already content-derived.
+    #[must_use]
+    pub fn hashed(&self, sha256_hex: &str) -> Option<Self> {
+        match self {
+            Self::Web(s) => Slug::hashed(s.as_str(), sha256_hex).map(Self::Web),
+            Self::Artifact(s) => Slug::hashed(s.as_str(), sha256_hex).map(Self::Artifact),
+            Self::Arxiv(_) | Self::File(_) | Self::Meeting(_) => None,
+        }
     }
 
     #[must_use]
@@ -209,6 +244,54 @@ impl Rel {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Query params that track a click rather than name a page, besides `utm_*`.
+const TRACKING: &[&str] = &["fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src"];
+
+/// The URL as `https://`, without `www.`, its fragment and tracking params; the other
+/// params keep their order.
+#[must_use]
+pub fn canonical_url(url: &str) -> String {
+    let url = url.split_once('#').map_or(url, |(u, _)| u);
+    let url = format!("https://{}", host_path(url));
+    let Some((base, query)) = url.split_once('?') else {
+        return url;
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|p| {
+            let key = p.split_once('=').map_or(*p, |(k, _)| k);
+            !p.is_empty() && !key.starts_with("utm_") && !TRACKING.contains(&key)
+        })
+        .collect();
+    if kept.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}?{}", kept.join("&"))
+    }
+}
+
+/// A URL without its scheme and `www.`.
+fn host_path(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.strip_prefix("www.").unwrap_or(rest)
+}
+
+/// Lowercase ASCII alphanumerics, with runs of anything else as one inner '-'; uncapped.
+fn slug_chars(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 /// Last path segment of a URL-ish reference, minus `arXiv:`, `.pdf`, query and fragment.
@@ -320,8 +403,37 @@ mod tests {
 
     #[test]
     fn derives_ids_from_sources() {
-        let web = DocId::web("https://www.example.com/blog/Post_1?utm=x").unwrap();
-        assert_eq!(web.to_string(), "web:example-com-blog-post-1");
+        let sha = "ABCDEF0123456789";
+        let canon =
+            canonical_url("https://www.example.com/blog/Post_1?utm_source=x&p=2&ref=hn#top");
+        assert_eq!(canon, "https://example.com/blog/Post_1?p=2");
+        let web = DocId::web_canonical(&canon, sha).unwrap();
+        assert_eq!(web.to_string(), "web:example-com-blog-post-1-p-2");
+        assert_eq!(
+            DocId::web("https://www.example.com/blog/Post_1?p=2").unwrap(),
+            DocId::parse("web:example-com-blog-post-1").unwrap()
+        );
+        assert_eq!(
+            canonical_url("https://x.com/a?utm_x=1&fbclid=2"),
+            "https://x.com/a"
+        );
+        assert_eq!(canonical_url("http://www.x.com/a"), "https://x.com/a");
+        assert_eq!(
+            canonical_url("https://x.com/a?b=1&a=2"),
+            "https://x.com/a?b=1&a=2"
+        );
+
+        let long = format!("https://example.com/{}", "a-".repeat(100));
+        let id = DocId::web_canonical(&long, sha).unwrap();
+        assert_eq!(id.rest().len(), 64);
+        assert!(id.rest().ends_with("-abcdef"), "{id}");
+        assert_eq!(DocId::parse(&id.to_string()).unwrap(), id);
+        assert_eq!(id.hashed(sha).unwrap(), id, "a cut slug hashes once");
+        let dash = DocId::artifact("Dashboard", sha).unwrap();
+        assert_eq!(
+            dash.hashed(sha).unwrap().to_string(),
+            "artifact:dashboard-abcdef"
+        );
         let m = DocId::meeting("2026-10-27", "Weekly sync!").unwrap();
         assert_eq!(m.to_string(), "meeting:2026-10-27-weekly-sync");
         assert_eq!(

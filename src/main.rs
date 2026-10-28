@@ -431,7 +431,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
         Cmd::Label { id, verdict } => {
             let id = match verdict {
                 Verdict::Like => warn(ingest::add(vault, id, &AddOpts::default())?).id,
-                Verdict::Skip | Verdict::Later => ingest::resolve(id)?,
+                Verdict::Skip | Verdict::Later => ingest::resolve(vault, id)?,
             };
             let ts = time::now()?.at;
             label::append(
@@ -446,7 +446,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             Reply::Fields(vec![("id", json!(id)), ("verdict", json!(verdict))])
         }
         Cmd::Link { a, b, rel } => {
-            let dst = ingest::resolve(b)
+            let dst = ingest::resolve(vault, b)
                 .map(|d| d.to_string())
                 .or_else(|_| Slug::parse(b).map(|s| s.to_string()))?;
             let what = format!("{a} {rel} {dst}");

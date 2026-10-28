@@ -4,7 +4,7 @@
 //! list items in concept and synthesis pages outside `## Open questions`, cited ids missing
 //! from `sources[]`, pages over [`MAX_TOKENS`]. A missing or long `summary` is the schema's.
 //! Warnings: orphans, contradictions open over [`CONTRADICTION_DAYS`], active pages not
-//! updated in [`STALE_DAYS`].
+//! updated in [`STALE_DAYS`], frontmatter keys C2 does not name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value};
 
 use crate::chunk;
-use crate::error::Result;
+use crate::contract;
+use crate::error::{Error, Result};
 use crate::id::DocId;
 use crate::index::{doc_spans, wikilinks};
 use crate::lint::{self, Finding};
@@ -64,6 +65,12 @@ pub fn check(vault: &Vault) -> Result<Checked> {
             first,
         });
     }
+    // The page schema allows any key, so a vault's own keys warn instead of blocking.
+    let schema: Value = serde_json::from_str(contract::PAGE).map_err(|source| Error::Decode {
+        what: "the page schema",
+        source,
+    })?;
+    let known = schema.get("properties").and_then(Value::as_object);
     let slugs: BTreeSet<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
     let mut inbound: BTreeSet<String> = BTreeSet::new();
     let mut out = Checked::default();
@@ -79,6 +86,14 @@ pub fn check(vault: &Vault) -> Result<Checked> {
                 error: line.map_or(why.clone(), |l| format!("line {l}: {why}")),
             });
         };
+        for key in p.fm.keys() {
+            if !known.is_some_and(|k| k.contains_key(key)) {
+                out.warnings.push(Finding {
+                    file: p.file.clone(),
+                    error: format!("unknown frontmatter key `{key}`"),
+                });
+            }
+        }
         let tokens = chunk::tokens(&p.raw);
         if tokens > MAX_TOKENS {
             error(

@@ -65,6 +65,14 @@
         "minLength": 1
       },
       "description": "Other names; an exact match in `find` goes straight to the page."
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Obsidian tags."
     }
   },
   "required": [
@@ -75,5 +83,5 @@
     "sources",
     "updated"
   ],
-  "additionalProperties": false
+  "$comment": "Any other key is allowed, and `brain lint` warns about it."
 }

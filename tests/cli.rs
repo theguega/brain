@@ -232,6 +232,37 @@ fn lint_names_a_missing_required_field_and_exits_1() {
 }
 
 #[test]
+fn lint_warns_about_unknown_page_keys_and_still_exits_0() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    let fm = "kind: concept\nsummary: Joint embeddings.\nstatus: active\nsources: []\nupdated: 2026-10-27\ntags: [ml/ssl, jepa]\n";
+    env.write(
+        "vault/pages/jepa.md",
+        &format!("---\ntitle: JEPA\n{fm}cssclasses: [wide]\n---\n# JEPA\n"),
+    );
+    let out = env.run(&["lint"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[0/0]{file,error}:\n"
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.contains("warning: pages/jepa.md: unknown frontmatter key `cssclasses`\n"),
+        "{err}"
+    );
+    assert!(!err.contains("`tags`"), "{err}");
+
+    env.write("vault/pages/jepa.md", &format!("---\n{fm}---\n# JEPA\n"));
+    let out = env.run(&["lint"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[1/1]{file,error}:\n  pages/jepa.md,missing required title\n"
+    );
+}
+
+#[test]
 fn lint_without_a_vault_is_an_error_with_next() {
     let env = Env::new(None);
     let out = env.run(&["lint", "--vault", env.dir.join("nowhere").to_str().unwrap()]);
@@ -351,6 +382,40 @@ fn add_artifact_keeps_the_page_and_its_why() {
         "id: artifact:other-page\nmissing: why\nhelp: fill them in docs/artifact--other-page/meta.json, then run brain lint\n"
     );
     assert_eq!(env.run(&["lint"]).status.code(), Some(1));
+}
+
+#[test]
+fn artifacts_with_one_title_get_their_own_docs() {
+    let env = Env::new(None);
+    let a = env.write("in/a.html", "<title>Dashboard</title><p>fleet</p>");
+    let b = env.write("in/b.html", "<title>Dashboard</title><p>evals</p>");
+    let add = |p: &PathBuf| env.ok(&["add", p.to_str().unwrap()]);
+    let first = add(&a);
+    assert!(first.starts_with("id: artifact:dashboard\n"), "{first}");
+    let second = add(&b);
+    let id = second
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("id: ")
+        .unwrap()
+        .to_owned();
+    assert!(
+        id.starts_with("artifact:dashboard-") && id.len() == "artifact:dashboard-".len() + 6,
+        "{second}"
+    );
+    assert!(
+        env.read(&format!("docs/{}/index.html", id.replace(':', "--")))
+            .contains("evals")
+    );
+    for (p, id) in [(&a, "artifact:dashboard"), (&b, id.as_str())] {
+        let again = add(p);
+        assert!(
+            again.starts_with(&format!("id: {id}\n")) && again.contains("noop: "),
+            "{again}"
+        );
+    }
+    assert_eq!(fs::read_dir(env.vault().join("docs")).unwrap().count(), 2);
 }
 
 #[test]
