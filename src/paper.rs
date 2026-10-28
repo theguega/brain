@@ -1,12 +1,12 @@
 //! The on-disk record: `papers/<id>/paper.json`.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::date::Day;
 use crate::error::{Error, Result};
-use crate::id::{ArxivId, PaperId, Slug, is_slug};
+use crate::id::{ArxivId, PaperId, Slug, is_slug, string_newtype_impls};
 
 /// Where a paper lives. The id is derived from this, so it cannot disagree with it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +54,26 @@ pub struct Paper {
 }
 
 impl Paper {
+    /// A bare record: everything but source, title and date left empty.
+    #[must_use]
+    pub fn new(source: Source, title: String, added: Day) -> Self {
+        Self {
+            source,
+            title,
+            name: String::new(),
+            authors: Vec::new(),
+            published: String::new(),
+            abstract_: String::new(),
+            tags: Vec::new(),
+            note: String::new(),
+            links: Vec::new(),
+            summary: String::new(),
+            keywords: Vec::new(),
+            added: added.iso(),
+            card: None,
+        }
+    }
+
     #[must_use]
     pub fn id(&self) -> PaperId {
         match &self.source {
@@ -101,7 +121,7 @@ impl Paper {
 }
 
 /// Lowercase slug, e.g. `vla`, `world-model`, `starred`.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Tag(String);
 
@@ -136,24 +156,7 @@ impl Tag {
     }
 }
 
-impl TryFrom<String> for Tag {
-    type Error = Error;
-    fn try_from(s: String) -> Result<Self> {
-        Self::parse(&s)
-    }
-}
-
-impl From<Tag> for String {
-    fn from(t: Tag) -> String {
-        t.0
-    }
-}
-
-impl fmt::Display for Tag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+string_newtype_impls!(Tag);
 
 /// Structured extraction, written by an agent from the paper text.
 /// `None` / empty means "the paper does not say", never a guess.

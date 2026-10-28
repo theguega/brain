@@ -21,6 +21,7 @@ use crate::paper::Paper;
 
 const GITIGNORE: &str = ".cache/\n.DS_Store\n";
 
+#[derive(Debug)]
 pub struct Library {
     root: PathBuf,
 }

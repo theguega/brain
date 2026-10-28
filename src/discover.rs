@@ -50,6 +50,7 @@ impl Candidate {
 }
 
 /// `inbox.jsonl`, one candidate per line, sorted by id: line-based git merges stay clean.
+#[derive(Debug)]
 pub struct Inbox(BTreeMap<ArxivId, Candidate>);
 
 impl Inbox {

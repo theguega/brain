@@ -1,5 +1,6 @@
 //! Turning a reference into a library entry: metadata, then full text.
 
+use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
@@ -9,28 +10,6 @@ use crate::id::{ArxivId, PaperId};
 use crate::library::Library;
 use crate::paper::{Paper, Source};
 use crate::{arxiv, hub, net};
-
-impl Paper {
-    /// A bare record: everything but source, title and date left empty.
-    #[must_use]
-    pub fn new(source: Source, title: String, added: Day) -> Self {
-        Self {
-            source,
-            title,
-            name: String::new(),
-            authors: Vec::new(),
-            published: String::new(),
-            abstract_: String::new(),
-            tags: Vec::new(),
-            note: String::new(),
-            links: Vec::new(),
-            summary: String::new(),
-            keywords: Vec::new(),
-            added: added.iso(),
-            card: None,
-        }
-    }
-}
 
 /// Metadata for an arXiv paper: the arXiv API first, the Hub for extras or when arXiv misses.
 pub fn describe(id: &ArxivId, added: Day) -> Result<Paper> {
@@ -93,6 +72,17 @@ pub enum Via {
     Pdftotext,
     /// Jina's reader (`r.jina.ai`): any web page as markdown.
     Reader,
+}
+
+impl fmt::Display for Via {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Hub => "hub",
+            Self::Pymupdf4llm => "pymupdf4llm",
+            Self::Pdftotext => "pdftotext",
+            Self::Reader => "reader",
+        })
+    }
 }
 
 /// Fetch and store full text for `paper`.

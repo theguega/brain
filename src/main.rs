@@ -282,7 +282,7 @@ fn add_one(lib: &Library, r: &str, a: &Args, tags: &[Tag]) -> Result<(PaperId, b
     paper.links.extend(a.all("--link").iter().cloned());
     lib.save(&paper)?;
     let via = match ingest::fetch_text(lib, &paper, Route::Auto) {
-        Ok(via) => format!("text via {via:?}").to_lowercase(),
+        Ok(via) => format!("text via {via}"),
         Err(e) => format!("NO TEXT ({e})"),
     };
     out!("added {id}  {}  [{via}]", paper.label());
@@ -543,7 +543,7 @@ fn text(lib: &Library, a: &Args) -> Result<()> {
             } else {
                 Route::Auto
             };
-            format!("{:?}", ingest::fetch_text(lib, &p, route)?).to_lowercase()
+            ingest::fetch_text(lib, &p, route)?.to_string()
         }
         _ => return Err(usage("text <id> [--pdf | -]")),
     };

@@ -114,11 +114,12 @@ pub(crate) fn is_slug(s: &str) -> bool {
         && !s.starts_with('-')
 }
 
+/// Serde and `Display` for a validated `String` newtype with a `parse` constructor.
 macro_rules! string_newtype_impls {
     ($($t:ty),*) => {$(
         impl TryFrom<String> for $t {
-            type Error = Error;
-            fn try_from(s: String) -> Result<Self> {
+            type Error = $crate::error::Error;
+            fn try_from(s: String) -> $crate::error::Result<Self> {
                 Self::parse(&s)
             }
         }
@@ -127,13 +128,14 @@ macro_rules! string_newtype_impls {
                 v.0
             }
         }
-        impl fmt::Display for $t {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $t {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(&self.0)
             }
         }
     )*};
 }
+pub(crate) use string_newtype_impls;
 string_newtype_impls!(ArxivId, Slug);
 
 impl fmt::Display for PaperId {

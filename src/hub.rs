@@ -87,8 +87,5 @@ pub fn daily(date: &str) -> Result<Vec<Daily>> {
 }
 
 fn decode<T: serde::de::DeserializeOwned>(body: &[u8], what: &'static str) -> Result<T> {
-    serde_json::from_slice(body).map_err(|source| Error::Decode {
-        what,
-        source,
-    })
+    serde_json::from_slice(body).map_err(|source| Error::Decode { what, source })
 }

@@ -35,6 +35,7 @@ CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 /// Column weights for ranking, in `fts` column order (id, name, title, abstract, keywords, note, body).
 const BM25: &str = "bm25(fts, 0, 10, 8, 4, 4, 4, 1)";
 
+#[derive(Debug)]
 pub struct Index {
     conn: Connection,
 }
@@ -51,6 +52,7 @@ pub struct Hit {
     pub snippet: String,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Query<'a> {
     /// Free text; empty for filter-only.
     pub text: &'a str,
