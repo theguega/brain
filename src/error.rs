@@ -19,7 +19,7 @@ pub enum Error {
     },
     #[error("bad JSON from {what}: {source}")]
     Decode {
-        what: String,
+        what: &'static str,
         #[source]
         source: serde_json::Error,
     },
@@ -27,6 +27,9 @@ pub enum Error {
     Sql(#[from] rusqlite::Error),
     #[error("`{cmd}` failed: {detail}")]
     Command { cmd: String, detail: String },
+    /// `curl` itself failed: not installed, DNS, TLS, timeout.
+    #[error("`curl {url}` failed: {detail}")]
+    Network { url: String, detail: String },
     #[error("HTTP {status} from {url}")]
     Http { url: String, status: u16 },
     #[error("not a paper reference: {0:?} (want an arXiv id or URL, or a lowercase slug)")]
@@ -55,8 +58,7 @@ impl Error {
         match self {
             Self::Usage(_) | Self::BadRef(_) | Self::BadTag(_) | Self::NoLibrary(_) => 2,
             Self::NotFound(_) => 3,
-            Self::Http { .. } => 4,
-            Self::Command { cmd, .. } if cmd.starts_with("curl ") => 4,
+            Self::Http { .. } | Self::Network { .. } => 4,
             _ => 1,
         }
     }

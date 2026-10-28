@@ -80,8 +80,8 @@ fn ok(url: &str, r: Response) -> Result<Vec<u8>> {
 }
 
 fn curl(url: &str, method: Method<'_>) -> Result<Response> {
-    let fail = |detail: String| Error::Command {
-        cmd: format!("curl {url}"),
+    let fail = |detail: String| Error::Network {
+        url: url.to_owned(),
         detail,
     };
     let mut cmd = Command::new("curl");
