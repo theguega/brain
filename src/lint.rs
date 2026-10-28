@@ -100,7 +100,7 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
 }
 
 /// File names in a top-level vault directory, sorted; none if it does not exist yet.
-fn entries(vault: &Vault, dir: &str) -> Result<Vec<String>> {
+pub(crate) fn entries(vault: &Vault, dir: &str) -> Result<Vec<String>> {
     let path = vault.path(Path::new(dir));
     if !path.is_dir() {
         return Ok(Vec::new());

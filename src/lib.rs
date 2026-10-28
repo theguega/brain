@@ -24,6 +24,7 @@ pub mod s2;
 pub mod search;
 pub mod time;
 pub mod vault;
+pub mod wiki;
 
 pub use error::{Error, Result};
 pub use id::{ArxivId, DocId, Rel, Slug};
