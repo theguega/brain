@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brain.local/contracts/repo.schema.json",
+  "title": "C13 repo",
+  "description": "A registered git checkout. path is relative to the home directory (B16).",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^(/|~)"
+      }
+    },
+    "remote": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    }
+  },
+  "required": [
+    "name",
+    "path",
+    "remote",
+    "project"
+  ],
+  "additionalProperties": false
+}

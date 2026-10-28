@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brain.local/contracts/context.schema.json",
+  "title": "C15 context",
+  "description": "~/.local/state/context.json: the current timezone and place. The last writer wins.",
+  "type": "object",
+  "properties": {
+    "tz": {
+      "type": "string",
+      "pattern": "^[A-Za-z]+(/[A-Za-z0-9_+-]+)*$"
+    },
+    "place": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "tz",
+    "updated_at",
+    "source"
+  ],
+  "additionalProperties": false
+}

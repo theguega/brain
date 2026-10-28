@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brain.local/contracts/kinds/paper.schema.json",
+  "title": "C1 doc: paper",
+  "description": "A research paper. Filled by arXiv, the HF Hub (githubRepo, projectPage), alphaXiv and Papers with Code (tldr, lineage). Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
+    },
+    "kind": {
+      "const": "paper"
+    },
+    "taint": {
+      "enum": [
+        "own",
+        "external"
+      ]
+    },
+    "added": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+      }
+    },
+    "why": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^(/|~)"
+      }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "venue": {
+      "type": "string",
+      "minLength": 1
+    },
+    "links": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "project": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "hf": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "openreview": {
+          "type": "string",
+          "pattern": "^https?://"
+        },
+        "video": {
+          "type": "string",
+          "pattern": "^https?://"
+        }
+      },
+      "additionalProperties": false
+    },
+    "abstract": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tldr": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "keywords": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "lineage": {
+      "description": "Papers with Code predecessor and successor papers: src builds on dst.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "src": {
+            "type": "string",
+            "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
+          },
+          "dst": {
+            "type": "string",
+            "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
+          },
+          "rel": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          }
+        },
+        "required": [
+          "src",
+          "dst",
+          "rel"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "card": {
+      "description": "Structured extraction from the paper text. null, [] or {} means the paper does not say, never a guess.",
+      "type": "object",
+      "properties": {
+        "family": {
+          "enum": [
+            "vla",
+            "wam",
+            "world-model",
+            "diffusion-policy",
+            "rl",
+            "control",
+            "benchmark",
+            "dataset",
+            "library",
+            "other"
+          ]
+        },
+        "backbone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action_head": {
+          "enum": [
+            "flow-matching",
+            "diffusion",
+            "fast-tokens",
+            "ar-bins",
+            "latent",
+            "mlp",
+            null
+          ]
+        },
+        "action_space": {
+          "enum": [
+            "joint",
+            "ee-delta",
+            "ee-abs",
+            "latent",
+            null
+          ]
+        },
+        "chunk_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "control_hz": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "embodiment": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "hours": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "episodes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "source": {
+              "enum": [
+                "in-house",
+                "OXE",
+                "human-video",
+                "mixed",
+                null
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "eval": {
+          "type": "object",
+          "properties": {
+            "sim": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            },
+            "real": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "open": {
+          "type": "object",
+          "properties": {
+            "weights": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "data": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "compute": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "family"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "id",
+    "kind",
+    "taint",
+    "added",
+    "title",
+    "authors",
+    "date",
+    "links"
+  ],
+  "additionalProperties": false
+}

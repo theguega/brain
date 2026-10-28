@@ -21,6 +21,18 @@ pub struct Entry {
     pub authors: Vec<String>,
     /// `YYYY-MM-DD`
     pub published: String,
+    /// The authors' free-text comment, often with the project page.
+    pub comment: String,
+}
+
+impl Entry {
+    /// URLs in the comment, trailing punctuation dropped.
+    pub fn comment_urls(&self) -> impl Iterator<Item = &str> {
+        self.comment
+            .split_whitespace()
+            .filter(|w| w.starts_with("http://") || w.starts_with("https://"))
+            .map(|w| w.trim_end_matches(['.', ',', ';', ')']))
+    }
 }
 
 /// Metadata for `ids`, 100 per request. Ids arXiv does not know are simply absent.
@@ -65,6 +77,7 @@ pub fn parse_feed(xml: &str) -> Vec<Entry> {
                 abstract_: clean(inner(block, "summary").unwrap_or_default()),
                 authors: all_inner(block, "name").into_iter().map(clean).collect(),
                 published: published.get(..10).unwrap_or(published).to_owned(),
+                comment: clean(inner(block, "arxiv:comment").unwrap_or_default()),
             })
         })
         .collect()
@@ -121,6 +134,7 @@ mod tests {
   <summary>Robots &amp; things.</summary>
   <author><name>Kevin Black</name></author>
   <author><name>Noah Brown</name></author>
+  <arxiv:comment>See project website for videos: https://physicalintelligence.company/blog/pi0. Published in RSS 2025</arxiv:comment>
   <arxiv:primary_category term="cs.LG"/>
 </entry>
 <entry><id>http://arxiv.org/api/errors#bad</id><title>Error</title></entry>
@@ -135,5 +149,9 @@ mod tests {
         assert_eq!(e[0].abstract_, "Robots & things.");
         assert_eq!(e[0].authors, ["Kevin Black", "Noah Brown"]);
         assert_eq!(e[0].published, "2024-10-31");
+        assert_eq!(
+            e[0].comment_urls().collect::<Vec<_>>(),
+            ["https://physicalintelligence.company/blog/pi0"]
+        );
     }
 }
