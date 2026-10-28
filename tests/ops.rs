@@ -640,7 +640,7 @@ fn the_profile_has_its_five_parts() {
     let env = Env::new(&closed_port());
     let (new, old) = (today(&env.tz, 3), today(&env.tz, 40));
     let (due, fresh) = (today(&env.tz, 8), today(&env.tz, 1));
-    env.write("pages/me.md", "---\nkind: person\ntitle: Me\nsummary: me\nstatus: active\nsources: []\nupdated: 2026-01-01\n---\n# Me\n\nShip brain tick.\nRead the JEPA papers.\nSleep.\nA fourth line.\n");
+    env.write("pages/me.md", &format!("---\nkind: person\ntitle: Me\nsummary: me\nstatus: active\nsources: []\nupdated: {new}\n---\n# Me\n\nShip brain tick.\nRead the JEPA papers.\nSleep.\nA fourth line.\n"));
     env.write("pages/brain.md", &format!("---\nkind: project\ntitle: Brain\nsummary: the knowledge layer\nstatus: active\nsources: []\nupdated: {new}\n---\nx\n"));
     env.write("pages/old.md", &format!("---\nkind: project\ntitle: Old\nsummary: dormant\nstatus: active\nsources: []\nupdated: {old}\n---\nx\n"));
     env.write(

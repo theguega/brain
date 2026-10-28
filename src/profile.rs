@@ -114,7 +114,7 @@ fn focus(vault: &Vault) -> Result<Vec<String>> {
         .collect())
 }
 
-/// `slug: summary` of the `status: active` pages updated in the last 14 days, newest first.
+/// `slug: summary` of the `status: active` project pages updated in the last 14 days, newest first.
 fn projects(vault: &Vault, today: i64) -> Result<Vec<String>> {
     let dir = vault.path(Path::new("pages"));
     if !dir.is_dir() {
@@ -137,7 +137,8 @@ fn projects(vault: &Vault, today: i64) -> Result<Vec<String>> {
         };
         let get = |k: &str| fm.get(k).and_then(Value::as_str).unwrap_or_default();
         let updated = get("updated");
-        if get("status") == "active"
+        if get("kind") == "project"
+            && get("status") == "active"
             && days(updated).is_some_and(|d| (0..=ACTIVE_DAYS).contains(&(today - d)))
         {
             found.push((updated.to_owned(), format!("{slug}: {}", get("summary"))));
