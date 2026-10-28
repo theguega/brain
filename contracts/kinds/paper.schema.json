@@ -115,7 +115,7 @@
       }
     },
     "builds_on": {
-      "description": "Papers with Code predecessor and successor papers, in the library or not. Absent until PwC answers; [] when it knows of none.",
+      "description": "What the paper builds on: its Papers with Code predecessors, in the library or not, plus papers in the library whose PwC successors include it. Absent until PwC answers; [] when it knows of none.",
       "type": "array",
       "items": {
         "type": "string",

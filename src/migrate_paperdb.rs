@@ -248,15 +248,18 @@ fn entry(
         r.warnings
             .push(format!("{id}: its PDF link {p} is not carried over"));
     }
+    let mut successors = Vec::new();
     match &old.source {
         OldSource::Arxiv(aid) => {
             if *pwc_misses < PWC_GIVE_UP {
                 match (net.pwc)(aid) {
                     Ok(found) => {
                         *pwc_misses = 0;
+                        let answer = Answer::of(&id, found);
                         if let Value::Object(body) = &mut doc.body {
-                            Answer::of(&id, found).fill(body);
+                            answer.fill(body);
                         }
+                        successors = answer.successors;
                         r.lineage += usize::from(doc.body.get("builds_on").is_some());
                     }
                     Err(e) => {
@@ -303,27 +306,59 @@ fn entry(
         cache_copy(&pdf, &cached)?;
         r.pdfs += 1;
     }
-    doc::write(vault, &id, doc::fields(&doc)?, &body)
+    doc::write(vault, &id, doc::fields(&doc)?, &body)?;
+    lineage::link_successors(vault, &id, &successors).map(drop)
 }
 
-/// Every `docs/<dir>/` still holding `meta.json`, folded into its note.
+/// Every `docs/<dir>/` still holding `meta.json`, folded into its note. The `lineage`
+/// edges of all of them are read first: an edge `{src, dst}` (src builds on dst) may be
+/// stored in dst's meta only.
 fn fold_layout(vault: &Vault, r: &mut Report) {
-    for name in names_of(&vault.path(Path::new("docs"))) {
-        let dir = Path::new("docs").join(&name);
-        if vault.path(&dir.join("meta.json")).is_file() {
-            match fold(vault, &name, &dir) {
-                Ok(()) => r.converted += 1,
-                Err(e) => r.failed.push(format!("docs/{name}: {e}")),
+    let names: Vec<String> = names_of(&vault.path(Path::new("docs")))
+        .into_iter()
+        .filter(|n| {
+            vault
+                .path(&Path::new("docs").join(n).join("meta.json"))
+                .is_file()
+        })
+        .collect();
+    let mut preds: BTreeMap<DocId, Vec<DocId>> = BTreeMap::new();
+    for name in &names {
+        let path = vault.path(&Path::new("docs").join(name).join("meta.json"));
+        let Ok(meta) = read_json::<Value>(&path) else {
+            continue;
+        };
+        for e in meta
+            .get("lineage")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let id = |k: &str| e.get(k).and_then(Value::as_str).map(DocId::parse);
+            if let (Some(Ok(src)), Some(Ok(dst))) = (id("src"), id("dst"))
+                && src != dst
+            {
+                let held = preds.entry(src).or_default();
+                if !held.contains(&dst) {
+                    held.push(dst);
+                }
             }
+        }
+    }
+    for name in names {
+        let dir = Path::new("docs").join(&name);
+        match fold(vault, &name, &dir, &preds) {
+            Ok(()) => r.converted += 1,
+            Err(e) => r.failed.push(format!("docs/{name}: {e}")),
         }
     }
 }
 
 /// `meta.json` becomes the note's frontmatter and `text.md` its body; then both go. The
-/// only values rewritten are the relations: `lineage` edges become `builds_on` wikilinks to
-/// the paper at their other end, and a meeting's page slugs become wikilinks. Rerun after
-/// a crash between the write and the removals, it writes the same note again.
-fn fold(vault: &Vault, name: &str, dir: &Path) -> Result<()> {
+/// only values rewritten are the relations: a paper with `lineage` gets `builds_on`, the
+/// papers it builds on in `preds`, and a meeting's page slugs become wikilinks. Rerun
+/// after a crash between the write and the removals, it writes the same note again.
+fn fold(vault: &Vault, name: &str, dir: &Path, preds: &BTreeMap<DocId, Vec<DocId>>) -> Result<()> {
     let id = DocId::from_dir(name)?;
     let meta_path = dir.join("meta.json");
     let Value::Object(mut fm) = read_json::<Value>(&vault.path(&meta_path))? else {
@@ -333,22 +368,9 @@ fn fold(vault: &Vault, name: &str, dir: &Path) -> Result<()> {
         });
     };
     let body = vault.read(&dir.join("text.md"))?.unwrap_or_default();
-    if let Some(edges) = fm.remove("lineage") {
-        let me = id.to_string();
-        let mut ids: Vec<DocId> = Vec::new();
-        for e in edges.as_array().into_iter().flatten() {
-            let other = [e.get("src"), e.get("dst")]
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .find(|x| *x != me);
-            if let Some(Ok(o)) = other.map(DocId::parse)
-                && !ids.contains(&o)
-            {
-                ids.push(o);
-            }
-        }
-        let links = lineage::builds_on(&ids).into_iter().map(Value::String);
+    if fm.remove("lineage").is_some() {
+        let ids = preds.get(&id).map_or(&[][..], Vec::as_slice);
+        let links = lineage::builds_on(ids).into_iter().map(Value::String);
         fm.insert("builds_on".to_owned(), Value::Array(links.collect()));
     }
     if fm.get("kind").and_then(Value::as_str) == Some(Kind::MEETING.as_str()) {

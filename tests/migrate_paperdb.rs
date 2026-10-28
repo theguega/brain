@@ -284,16 +284,25 @@ fn fixture(dir: &Path) -> Fixture {
     }
 }
 
-/// PwC: π0 has lineage, FAST is unknown (404).
+fn related(ids: &[&str]) -> Option<Vec<Related>> {
+    Some(
+        ids.iter()
+            .map(|i| Related {
+                arxiv_id: Some((*i).to_owned()),
+            })
+            .collect(),
+    )
+}
+
+/// PwC: π0 builds on PaliGemma (not in the vault); π0.5 (not in the vault) and FAST build
+/// on π0. FAST is unknown (404).
 fn pwc_stub(id: &ArxivId) -> Result<Option<pwc::Paper>> {
     Ok((id.as_str() == "2410.24164").then(|| pwc::Paper {
         arxiv_id: Some("2410.24164".to_owned()),
         tldr: Some("Flow matching on a VLM.".to_owned()),
         conference_name: Some("RSS".to_owned()),
-        predecessor_papers: Some(vec![]),
-        successor_papers: Some(vec![Related {
-            arxiv_id: Some("2504.16054".to_owned()),
-        }]),
+        predecessor_papers: related(&["2407.07726"]),
+        successor_papers: related(&["2504.16054", "2501.09747"]),
     }))
 }
 
@@ -424,7 +433,11 @@ fn migrates_papers_journal_readings_and_skips() {
     );
     assert_eq!(p["tldr"], "Flow matching on a VLM.");
     assert_eq!(p["venue"], "RSS");
-    assert_eq!(p["builds_on"], json!(["[[arxiv--2504.16054]]"]));
+    assert_eq!(
+        p["builds_on"],
+        json!(["[[arxiv--2407.07726]]"]),
+        "its predecessors only: a successor's edge is on the successor"
+    );
     assert_eq!(p["aliases"], json!([p["title"]]), "two keywords are topics");
     let pi0 = v.path(Path::new("docs/arxiv--2410.24164"));
     assert_eq!(
@@ -785,7 +798,7 @@ fn lineage_waits_for_papers_with_code_then_reindex_fills_it() {
         "FAST is a 404: still pending"
     );
     let p = meta(&v, "docs/arxiv--2410.24164");
-    assert_eq!(p["builds_on"], json!(["[[arxiv--2504.16054]]"]));
+    assert_eq!(p["builds_on"], json!(["[[arxiv--2407.07726]]"]));
     assert_eq!(
         (&p["tldr"], &p["venue"]),
         (&json!("Flow matching on a VLM."), &json!("RSS"))
@@ -874,6 +887,54 @@ fn one_pwc_failure_costs_only_that_paper() {
 }
 
 #[test]
+fn a_successor_in_the_vault_gets_the_edge_on_its_own_note() {
+    let dir = tmp();
+    let fx = fixture(&dir);
+    let v = vault(&dir);
+    let fast_answered = |id: &ArxivId| -> Result<Option<pwc::Paper>> {
+        if id.as_str() == "2501.09747" {
+            return Ok(Some(pwc::Paper {
+                arxiv_id: Some("2501.09747".to_owned()),
+                ..pwc::Paper::default()
+            }));
+        }
+        pwc_stub(id)
+    };
+    let net = Lookups {
+        pwc: &fast_answered,
+        hal: &hal_stub,
+    };
+    migrate_paperdb::run(&v, &fx.sources(), &fx.pdfs, &now(), net);
+    // π0 was migrated before FAST was in the vault, and FAST's own record omits π0.
+    assert_eq!(meta(&v, "docs/arxiv--2501.09747")["builds_on"], json!([]));
+    let pi0 = brain::DocId::parse("arxiv:2410.24164").unwrap();
+    let fast = brain::DocId::parse("arxiv:2501.09747").unwrap();
+    let pi05 = brain::DocId::parse("arxiv:2504.16054").unwrap();
+    let both = [pi05, fast];
+    assert_eq!(lineage::link_successors(&v, &pi0, &both).unwrap(), 1);
+    assert_eq!(
+        meta(&v, "docs/arxiv--2501.09747")["builds_on"],
+        json!(["[[arxiv--2410.24164]]"])
+    );
+    assert_eq!(lineage::link_successors(&v, &pi0, &both).unwrap(), 0);
+    assert!(!v.root().join("docs/arxiv--2504.16054").exists());
+
+    // A successor whose own PwC answer is pending keeps waiting for it.
+    let v2 = vault(&tmp());
+    let down = Lookups {
+        pwc: &pwc_down,
+        hal: &hal_stub,
+    };
+    migrate_paperdb::run(&v2, &fx.sources(), &fx.pdfs, &now(), down);
+    assert_eq!(lineage::link_successors(&v2, &pi0, &both).unwrap(), 0);
+    assert!(
+        meta(&v2, "docs/arxiv--2501.09747")
+            .get("builds_on")
+            .is_none()
+    );
+}
+
+#[test]
 fn an_old_layout_vault_is_folded_into_notes_keeping_every_value() {
     let dir = tmp();
     let v = vault(&dir);
@@ -885,6 +946,12 @@ fn an_old_layout_vault_is_folded_into_notes_keeping_every_value() {
         "lineage": [{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}],
     });
     write(&docs.join("arxiv--2410.24164/meta.json"), pi0.to_string());
+    let pi05 = json!({
+        "id": "arxiv:2504.16054", "kind": "paper", "taint": "external",
+        "added": "2026-10-02T12:00:00-07:00", "title": "$π_{0.5}$", "authors": ["A"],
+        "date": "2025-04-22", "links": {}, "lineage": [],
+    });
+    write(&docs.join("arxiv--2504.16054/meta.json"), pi05.to_string());
     write(&docs.join("arxiv--2410.24164/text.md"), "---\n# π0\n");
     let fast = json!({
         "id": "arxiv:2501.09747", "kind": "paper", "taint": "external",
@@ -918,16 +985,21 @@ fn an_old_layout_vault_is_folded_into_notes_keeping_every_value() {
     };
 
     let r = migrate_paperdb::run(&v, &src, &dir.join("pdf"), &now(), NET);
-    assert_eq!(r.converted, 4, "{r:#?}");
+    assert_eq!(r.converted, 5, "{r:#?}");
     assert!(r.failed.is_empty(), "{r:#?}");
     let (p, body) = note(&v, "docs/arxiv--2410.24164");
     let mut want = pi0.clone();
     let w = want.as_object_mut().unwrap();
     w.remove("lineage");
-    w.insert("builds_on".into(), json!(["[[arxiv--2504.16054]]"]));
+    w.insert("builds_on".into(), json!([]));
     w.insert("aliases".into(), json!(["$π_0$: A VLA", "π0"]));
     assert_eq!(p, want);
     assert_eq!(body, "---\n# π0\n");
+    // The edge was stored in π0's meta only; it lands on π0.5, the paper that builds on π0.
+    assert_eq!(
+        meta(&v, "docs/arxiv--2504.16054")["builds_on"],
+        json!(["[[arxiv--2410.24164]]"])
+    );
     assert_eq!(meta(&v, "docs/arxiv--2501.09747")["builds_on"], json!([]));
     let (m, body) = note(&v, "docs/meeting--2026-10-27-sync");
     assert_eq!(m["attendees"], json!(["[[alice]]", "[[bob]]"]));

@@ -344,6 +344,15 @@ pub fn log_query(q: &str, ids: &[&str]) -> Result<()> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relation {
+    pub rel: String,
+    /// The doc or page at the other end.
+    pub other: String,
+    /// `other rel this`, written on the other note.
+    pub incoming: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Got {
     pub id: String,
     pub kind: String,
@@ -352,9 +361,9 @@ pub struct Got {
     pub taint: String,
     /// Chunks in the doc: the numbers a span can name.
     pub chunks: usize,
-    /// Its typed relations, `(rel, dst)`, from wikilink-valued frontmatter; body links are
-    /// in the text.
-    pub links: Vec<(String, String)>,
+    /// Its typed relations, from wikilink-valued frontmatter, its own then other notes';
+    /// body links are in the text.
+    pub links: Vec<Relation>,
     pub span: Option<String>,
     /// Fenced when external.
     pub text: String,
@@ -430,13 +439,23 @@ pub fn get(ix: &Index, spec: &str, full: bool) -> Result<Got> {
             spans: format!("1-{}, or a heading: {}", chunks.len(), headings.join(", ")),
         });
     }
-    let mut stmt = ix.conn.prepare(
-        "SELECT rel, dst FROM links WHERE src = ?1 AND rel NOT IN ('cites', 'mentions')
-         ORDER BY rowid",
-    )?;
-    let links = stmt
-        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut links = Vec::new();
+    for (incoming, sql) in [
+        (false, "SELECT rel, dst FROM links WHERE src = ?1"),
+        (true, "SELECT rel, src FROM links WHERE dst = ?1"),
+    ] {
+        let mut stmt = ix.conn.prepare(&format!(
+            "{sql} AND rel NOT IN ('cites', 'mentions') ORDER BY rowid"
+        ))?;
+        let rows = stmt.query_map([&id], |r| {
+            Ok(Relation {
+                rel: r.get(0)?,
+                other: r.get(1)?,
+                incoming,
+            })
+        })?;
+        links.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
     let external = taint != "own";
     let text = picked.join("\n\n");
     let text = if external { defang(&text) } else { text };

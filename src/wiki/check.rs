@@ -1,7 +1,8 @@
 //! `brain lint`, wiki part (B18): deterministic checks on `pages/*.md` beyond the schema.
 //!
-//! A `[[<doc dir>]]` or `[[<doc dir>#<heading>]]` wikilink is a citation; any other
-//! `[[wikilink]]` names a page.
+//! A wikilink resolves as Obsidian does (see [`Names`]): a doc's directory name, a page's
+//! slug, then an alias. One that names a doc, `[[arxiv--2410.24164#Method]]` or
+//! `[[π0#Method]]`, is a citation; an alias two notes hold is an error naming both.
 //!
 //! Errors: dead wikilinks and citations, uncited paragraphs and list items in concept and
 //! synthesis pages outside `## Open questions`, cited ids missing from `sources[]`, pages
@@ -19,9 +20,9 @@ use crate::chunk;
 use crate::contract;
 use crate::error::{Error, Result};
 use crate::id::DocId;
-use crate::index::doc_spans;
+use crate::index::{self, doc_spans};
 use crate::lint::{self, Finding};
-use crate::note;
+use crate::note::{self, Names, Resolved, Target};
 use crate::search::norm;
 use crate::vault::{Vault, git};
 
@@ -74,7 +75,7 @@ pub fn check(vault: &Vault) -> Result<Checked> {
         source,
     })?;
     let known = schema.get("properties").and_then(Value::as_object);
-    let slugs: BTreeSet<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
+    let names = index::names(vault)?;
     let mut inbound: BTreeSet<String> = BTreeSet::new();
     let mut out = Checked::default();
     let mut spans: BTreeMap<DocId, Vec<String>> = BTreeMap::new();
@@ -115,7 +116,7 @@ pub fn check(vault: &Vault) -> Result<Checked> {
             p.fm.get("kind").and_then(Value::as_str),
             Some("concept" | "synthesis")
         );
-        for (dst, _) in note::relations(&p.fm) {
+        for (dst, _) in note::relations(&p.fm, &names) {
             inbound_from(&mut inbound, &p.slug, &dst);
         }
 
@@ -123,7 +124,7 @@ pub fn check(vault: &Vault) -> Result<Checked> {
         let mut unsourced: BTreeSet<DocId> = BTreeSet::new();
         let mut blocks = Blocks::default();
         for (n, line) in (p.first..).zip(body) {
-            if !blocks.line(n, line) {
+            if !blocks.line(n, line, &names) {
                 continue;
             }
             for link in note::links(line) {
@@ -131,12 +132,24 @@ pub fn check(vault: &Vault) -> Result<Checked> {
                     Some(h) => format!("[[{}#{h}]]", link.target),
                     None => format!("[[{}]]", link.target),
                 };
-                let Some(id) = link.doc() else {
-                    inbound_from(&mut inbound, &p.slug, link.target);
-                    if !slugs.contains(link.target) {
-                        error(Some(n), format!("dead link {shown}"));
+                let id = match names.resolve(link.target) {
+                    Resolved::Found(Target::Doc(id)) => id,
+                    Resolved::Found(Target::Page(slug)) => {
+                        inbound_from(&mut inbound, &p.slug, &slug);
+                        continue;
                     }
-                    continue;
+                    Resolved::Ambiguous(held) => {
+                        let held: Vec<String> = held.iter().map(Target::dst).collect();
+                        error(
+                            Some(n),
+                            format!("ambiguous {shown}: an alias of {}", held.join(" and ")),
+                        );
+                        continue;
+                    }
+                    Resolved::Unknown => {
+                        error(Some(n), format!("dead link {shown}"));
+                        continue;
+                    }
                 };
                 if !vault.has_doc(&id) {
                     error(Some(n), format!("dead citation {shown}"));
@@ -247,7 +260,7 @@ struct Block {
 
 impl Blocks {
     /// Feeds one line; `false` when it is not prose (code, math, a comment).
-    fn line(&mut self, n: usize, line: &str) -> bool {
+    fn line(&mut self, n: usize, line: &str, names: &Names) -> bool {
         match &self.raw {
             Some(Raw::Fence(c, len)) => {
                 let t = line.trim();
@@ -318,7 +331,7 @@ impl Blocks {
         if is_item(t) {
             self.flush();
         }
-        let cited = note::links(t).iter().any(|l| l.doc().is_some());
+        let cited = note::links(t).iter().any(|l| names.doc(l).is_some());
         let claims = has_words(t);
         let b = self.cur.get_or_insert(Block {
             line: n,
@@ -477,7 +490,7 @@ mod tests {
     fn uncited(body: &str) -> Vec<usize> {
         let mut b = Blocks::default();
         for (n, l) in (1..).zip(body.lines()) {
-            b.line(n, l);
+            b.line(n, l, &Names::default());
         }
         b.finish()
     }

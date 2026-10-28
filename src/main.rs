@@ -87,7 +87,8 @@ enum Cmd {
     },
     /// Validate every doc and page against its schema, plus the wiki checks; exit 1 on errors
     ///
-    /// A doc is cited as [[<doc-dir>]] or [[<doc-dir>#<heading>]], e.g. [[arxiv--2410.24164]].
+    /// A doc is cited as [[<doc-dir>]] or [[<doc-dir>#<heading>]], e.g. [[arxiv--2410.24164]],
+    /// or by one of its aliases, [[π0#Method]]; an alias two notes hold is an error.
     /// Wiki errors: dead [[links]] and citations, uncited paragraphs or list items in concept
     /// and synthesis pages outside `## Open questions`, cited ids missing from sources[],
     /// pages over 1500 tokens. Warnings, on stderr: orphan pages, contradictions open over
@@ -332,7 +333,10 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
                 let links: Vec<String> = got
                     .links
                     .iter()
-                    .map(|(rel, dst)| format!("{rel} → {dst}"))
+                    .map(|l| {
+                        let arrow = if l.incoming { '←' } else { '→' };
+                        format!("{} {arrow} {}", l.rel, l.other)
+                    })
                     .collect();
                 fields.push(("links", json!(links)));
             }

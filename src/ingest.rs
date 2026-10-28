@@ -259,11 +259,13 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     p.links.code = p.links.code.or(ax.code).or(comment_code);
     p.links.project = p.links.project.or(comment_project);
     p.summary = p.summary.or(ax.summary);
+    let mut successors = Vec::new();
     if let Some(found) = pwc {
         let answer = lineage::Answer::of(&id, found);
         p.builds_on = answer.lineage.as_deref().map(lineage::builds_on);
         p.venue = answer.venue;
         p.tldr = answer.tldr;
+        successors = answer.successors;
     }
 
     let text = paper_text(aid).unwrap_or_else(|e| {
@@ -273,6 +275,7 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     let now = time::now()?;
     let doc = envelope(id, Kind::PAPER, opts, &now, None, p);
     let mut added = write(vault, &doc, text.as_deref().unwrap_or_default(), None)?;
+    lineage::link_successors(vault, &added.id, &successors)?;
     added.warnings = warnings;
     Ok(added)
 }

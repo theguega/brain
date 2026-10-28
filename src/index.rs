@@ -17,6 +17,7 @@ use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
 use crate::id::{DocId, Slug};
 use crate::log::Entry;
+use crate::note::{Names, Target};
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
 use crate::{doc, note, page};
@@ -240,7 +241,8 @@ fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool)
     let tx = ix.conn.transaction()?;
     let mut seen = BTreeSet::new();
     let mut changed = 0;
-    vault_sources(vault, &mut counts.warnings, |s| {
+    let names = names(vault)?;
+    vault_sources(vault, &names, &mut counts.warnings, |s| {
         changed += usize::from(upsert(&tx, &s)?);
         seen.insert(s.id);
         Ok(())
@@ -360,10 +362,11 @@ pub fn reindex_pages(
     };
     let mut warnings = Vec::new();
     let lock = write_lock(path)?;
+    let names = names(vault)?;
     let tx = ix.conn.transaction()?;
     for slug in slugs {
         if vault.path(&page::path(slug)).is_file() {
-            match page_source(vault, slug.as_str()) {
+            match page_source(vault, &names, slug.as_str()) {
                 Ok(s) => {
                     upsert(&tx, &s)?;
                 }
@@ -552,11 +555,12 @@ fn embed_missing(
 /// memory. Unreadable files are warnings, not failures: `brain lint` is where they get fixed.
 fn vault_sources(
     vault: &Vault,
+    names: &Names,
     warnings: &mut Vec<String>,
     mut f: impl FnMut(Source) -> Result<()>,
 ) -> Result<()> {
     for name in entries(vault, "docs")? {
-        match doc_source(vault, &name) {
+        match doc_source(vault, names, &name) {
             Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("docs/{name}: {e}")),
         }
@@ -565,7 +569,7 @@ fn vault_sources(
         let Some(slug) = name.strip_suffix(".md") else {
             continue;
         };
-        match page_source(vault, slug) {
+        match page_source(vault, names, slug) {
             Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("pages/{name}: {e}")),
         }
@@ -603,7 +607,7 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty())
 }
 
-fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
+fn doc_source(vault: &Vault, names: &Names, dir: &str) -> Result<Source> {
     let id = DocId::from_dir(dir)?;
     let rel = Path::new("docs").join(dir);
     let (fm, body) = doc::read(vault, &id)?.ok_or_else(|| Error::Invalid {
@@ -637,9 +641,9 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     }
     text.push_str(&body);
     let id = id.to_string();
-    let mut links = note::body_links(&body);
+    let mut links = note::body_links(&body, names);
     if let Value::Object(fm) = &meta {
-        links.extend(note::relations(fm));
+        links.extend(note::relations(fm, names));
     }
     Ok(Source {
         title: str_of(&meta, "title").unwrap_or(&id).to_owned(),
@@ -653,12 +657,12 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     })
 }
 
-fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
+fn page_source(vault: &Vault, names: &Names, slug: &str) -> Result<Source> {
     let path = Path::new("pages").join(format!("{slug}.md"));
     let raw = vault.read(&path)?.unwrap_or_default();
     let (fm, body) = note::read(&raw, &path)?;
-    let mut links = note::body_links(&body);
-    links.extend(note::relations(&fm));
+    let mut links = note::body_links(&body, names);
+    links.extend(note::relations(&fm, names));
     let fm = Value::Object(fm);
     Ok(Source {
         id: slug.to_owned(),
@@ -674,10 +678,36 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
     })
 }
 
+/// Every page slug, and every doc's and page's aliases: what a wikilink can name. A note
+/// that does not read names nothing; the reindex warns about it on its own pass.
+pub(crate) fn names(vault: &Vault) -> Result<Names> {
+    let mut names = Names::default();
+    for name in entries(vault, "docs")? {
+        if let Ok(id) = DocId::from_dir(&name)
+            && let Ok(Some((fm, _))) = doc::read(vault, &id)
+        {
+            names.add_aliases(&fm, &Target::Doc(id));
+        }
+    }
+    for name in entries(vault, "pages")? {
+        let Some(slug) = name.strip_suffix(".md") else {
+            continue;
+        };
+        names.add_page(slug);
+        let path = Path::new("pages").join(&name);
+        if let Some(text) = vault.read(&path)?
+            && let Ok((fm, _)) = note::read(&text, &path)
+        {
+            names.add_aliases(&fm, &Target::Page(slug.to_owned()));
+        }
+    }
+    Ok(names)
+}
+
 /// The spans `brain get <id>#<span>` would accept for the doc once indexed, read from the
 /// vault alone: each chunk's heading, in order, so chunk `n` is the `n`th.
 pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
-    Ok(doc_source(vault, &id.dir())?
+    Ok(doc_source(vault, &Names::default(), &id.dir())?
         .chunks()
         .into_iter()
         .map(|c| c.heading)

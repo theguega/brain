@@ -123,18 +123,95 @@ impl<'a> Link<'a> {
         let target = target.trim();
         (!target.is_empty()).then_some(Self { target, heading })
     }
+}
 
-    /// The doc it names: a citation. Its target is the doc's directory name.
-    #[must_use]
-    pub fn doc(&self) -> Option<DocId> {
-        DocId::from_dir(self.target).ok()
-    }
+/// What a wikilink names.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Target {
+    Doc(DocId),
+    Page(String),
+}
 
-    /// What the index stores as `dst`: a doc's id, else the target as written.
+impl Target {
+    /// As the index stores it: a doc's id or a page's slug.
     #[must_use]
     pub fn dst(&self) -> String {
-        self.doc()
-            .map_or_else(|| self.target.to_owned(), |id| id.to_string())
+        match self {
+            Self::Doc(id) => id.to_string(),
+            Self::Page(slug) => slug.clone(),
+        }
+    }
+}
+
+/// How a wikilink resolves, in Obsidian's order: a doc's directory name, a page's slug,
+/// then an alias (`aliases` in a doc's or page's frontmatter), matched exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    Found(Target),
+    /// An alias more than one note holds.
+    Ambiguous(&'a [Target]),
+    Unknown,
+}
+
+/// The names a vault's wikilinks can use, besides doc directory names.
+#[derive(Clone, Debug, Default)]
+pub struct Names {
+    pages: std::collections::BTreeSet<String>,
+    aliases: std::collections::BTreeMap<String, Vec<Target>>,
+}
+
+impl Names {
+    pub fn add_page(&mut self, slug: &str) {
+        self.pages.insert(slug.to_owned());
+    }
+
+    /// The note's `aliases`, each naming `target`.
+    pub fn add_aliases(&mut self, fm: &Fields, target: &Target) {
+        for a in fm
+            .get("aliases")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let held = self.aliases.entry(a.to_owned()).or_default();
+            if !held.contains(target) {
+                held.push(target.clone());
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn resolve(&self, target: &str) -> Resolved<'_> {
+        if let Ok(id) = DocId::from_dir(target) {
+            return Resolved::Found(Target::Doc(id));
+        }
+        if self.pages.contains(target) {
+            return Resolved::Found(Target::Page(target.to_owned()));
+        }
+        match self.aliases.get(target).map(Vec::as_slice) {
+            Some([one]) => Resolved::Found(one.clone()),
+            Some(many) if !many.is_empty() => Resolved::Ambiguous(many),
+            _ => Resolved::Unknown,
+        }
+    }
+
+    /// The doc a link cites, if it names one.
+    #[must_use]
+    pub fn doc(&self, link: &Link<'_>) -> Option<DocId> {
+        match self.resolve(link.target) {
+            Resolved::Found(Target::Doc(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// What the index stores as `dst`: what it resolves to, else the target as written.
+    #[must_use]
+    pub fn dst(&self, link: &Link<'_>) -> String {
+        match self.resolve(link.target) {
+            Resolved::Found(t) => t.dst(),
+            _ => link.target.to_owned(),
+        }
     }
 }
 
@@ -172,7 +249,7 @@ pub fn is_relation(v: &Value) -> bool {
 
 /// The frontmatter's relations as `(dst, rel)`: each wikilink-valued key, once per link.
 #[must_use]
-pub fn relations(fm: &Fields) -> Vec<(String, String)> {
+pub fn relations(fm: &Fields, names: &Names) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for (rel, v) in fm.iter().filter(|(_, v)| is_relation(v)) {
         let items = match v {
@@ -183,7 +260,7 @@ pub fn relations(fm: &Fields) -> Vec<(String, String)> {
             items
                 .into_iter()
                 .filter_map(value_link)
-                .map(|l| (l.dst(), rel.clone())),
+                .map(|l| (names.dst(&l), rel.clone())),
         );
     }
     out
@@ -191,15 +268,15 @@ pub fn relations(fm: &Fields) -> Vec<(String, String)> {
 
 /// The body's links as `(dst, rel)`, once each: `cites` for a doc, `mentions` otherwise.
 #[must_use]
-pub fn body_links(body: &str) -> Vec<(String, String)> {
+pub fn body_links(body: &str, names: &Names) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for l in links(body) {
-        let rel = if l.doc().is_some() {
+        let rel = if names.doc(&l).is_some() {
             "cites"
         } else {
             "mentions"
         };
-        let link = (l.dst(), rel.to_owned());
+        let link = (names.dst(&l), rel.to_owned());
         if !out.contains(&link) {
             out.push(link);
         }
@@ -224,13 +301,30 @@ mod tests {
                 ("arxiv--2410.24164", Some("Method"))
             ]
         );
+        let mut names = Names::default();
+        let pi0 = Target::Doc(DocId::parse("arxiv:2410.24164").unwrap());
+        let Value::Object(aliases) = json!({"aliases": ["π0", "VLA"]}) else {
+            unreachable!()
+        };
+        names.add_aliases(&aliases, &pi0);
+        let Value::Object(vla) = json!({"aliases": ["VLA"]}) else {
+            unreachable!()
+        };
+        names.add_aliases(&vla, &Target::Page("vla".to_owned()));
+        names.add_page("brain");
         assert_eq!(
-            body_links("[[pi0]] [[arxiv--2410.24164]] [[arxiv--2410.24164#2]]"),
+            body_links(
+                "[[pi0]] [[arxiv--2410.24164]] [[arxiv--2410.24164#2]] [[π0#Method]] [[VLA]] [[arxiv:2410.24164]]",
+                &names
+            ),
             [
                 ("pi0".to_owned(), "mentions".to_owned()),
-                ("arxiv:2410.24164".to_owned(), "cites".to_owned())
+                ("arxiv:2410.24164".to_owned(), "cites".to_owned()),
+                ("VLA".to_owned(), "mentions".to_owned()),
+                ("arxiv:2410.24164".to_owned(), "mentions".to_owned()),
             ]
         );
+        assert!(matches!(names.resolve("VLA"), Resolved::Ambiguous([_, _])));
         let fm = json!({
             "builds_on": ["[[arxiv--2504.16054]]"], "project": "[[brain]]",
             "title": "[not a link]", "tags": ["vla"], "empty": [],
@@ -239,7 +333,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            relations(&fm),
+            relations(&fm, &names),
             [
                 ("arxiv:2504.16054".to_owned(), "builds_on".to_owned()),
                 ("brain".to_owned(), "project".to_owned())

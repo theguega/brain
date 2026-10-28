@@ -357,6 +357,56 @@ fn a_heading_citation_passes_and_an_uncited_paragraph_fails() {
 }
 
 #[test]
+fn an_alias_cites_its_doc_and_an_ambiguous_one_fails() {
+    let env = Env::new();
+    for (id, aliases, body) in [
+        (
+            PI0,
+            json!(["π0", "VLA"]),
+            "# Method\n\nA flow matching action expert.\n",
+        ),
+        (PI05, json!(["π0.5", "VLA"]), ""),
+    ] {
+        let dir = id.replace(':', "--");
+        let meta = json!({"id": id, "kind": "paper", "taint": "external",
+            "added": "2026-10-20T10:00:00+02:00", "title": format!("Paper {id}"),
+            "aliases": aliases, "authors": ["A"], "date": "2024-10-31", "links": {}});
+        env.write(
+            &format!("docs/{dir}/{dir}.md"),
+            &format!("---\n{meta}\n---\n{body}"),
+        );
+    }
+    let cited = page(
+        "Pi0",
+        PI0,
+        "Its action expert is a flow head [[π0#Method]].",
+    );
+    env.write("pages/pi0.md", &cited);
+    let out = env.run(&["lint"]);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[0/0]{file,error}:\n"
+    );
+
+    env.write(
+        "pages/pi0.md",
+        &format!("{cited}\n- No span [[π0#Results]].\n- Both [[VLA]].\n- Colon [[arxiv:2410.24164]].\n- Unsourced [[π0.5]].\n"),
+    );
+    let out = env.run(&["lint"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[6/6]{file,error}:\n  \
+         pages/pi0.md,line 13: dead citation [[π0#Results]]: no such span\n  \
+         pages/pi0.md,line 14: ambiguous [[VLA]]: an alias of arxiv:2410.24164 and arxiv:2504.16054\n  \
+         pages/pi0.md,line 15: dead link [[arxiv:2410.24164]]\n  \
+         pages/pi0.md,line 16: arxiv:2504.16054 is cited but not in sources[]\n  \
+         pages/pi0.md,line 14: uncited paragraph: cite a doc as [[<doc-id>]]\n  \
+         pages/pi0.md,line 15: uncited paragraph: cite a doc as [[<doc-id>]]\n"
+    );
+}
+
+#[test]
 fn wiki_lint_finds_dead_links_citations_and_unlisted_sources() {
     let env = Env::new();
     let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";

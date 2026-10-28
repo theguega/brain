@@ -282,7 +282,7 @@ fn fixture(env: &Env) {
             "title": "π0: A Vision-Language-Action Flow Model for General Robot Control",
             "authors": ["Kevin Black"], "date": "2024-10-31",
             "links": {"code": "https://github.com/example/demo"},
-            "builds_on": ["[[arxiv--2504.16054]]"],
+            "builds_on": ["[[arxiv--2407.07726]]"], "aliases": ["π0"],
             "abstract": format!("We propose a flow matching action expert on a VLM backbone.\n{INJECTION}"),
         }),
         "# Introduction\n\nGeneralist robot policies need **broad data** and a [flow matching](https://x.y) head.\n\n\
@@ -301,7 +301,7 @@ fn fixture(env: &Env) {
     );
     env.write(
         "pages/action-chunking.md",
-        "---\nkind: concept\ntitle: Action chunking\nsummary: Predict k actions at once, execute them open loop\nstatus: active\nsources: [arxiv:2410.24164]\nupdated: 2026-10-22\naliases: [ACT, chunked actions]\n---\n\
+        "---\nkind: concept\ntitle: Action chunking\nsummary: Predict k actions at once, execute them open loop\nstatus: active\nsources: [arxiv:2410.24164]\nupdated: 2026-10-22\naliases: [ACT, chunked actions]\nbuilds_on: [\"[[π0]]\"]\n---\n\
          Policies predict a chunk of future actions [[arxiv--2410.24164#Method]]. See [[demo]].\n",
     );
     env.write(
@@ -371,13 +371,18 @@ fn deleting_the_index_and_reindexing_gives_identical_finds() {
     assert_eq!(Env::count(&first, "repos"), 1, "{first}");
     let before = golden(&env);
     assert!(!before.contains("degraded"), "{before}");
-    // Relations come from the frontmatter; the page's citation is a body link, not one.
+    // Relations come from the frontmatter, resolved by dir id or alias, and show from both
+    // ends; the page's citation is a body link, not one.
     let pi0 = env.ok(&["get", "arxiv:2410.24164"]);
     assert!(
-        pi0.contains("\nlinks: builds_on → arxiv:2504.16054\n"),
+        pi0.contains("\nlinks: builds_on → arxiv:2407.07726, builds_on ← action-chunking\n"),
         "{pi0}"
     );
-    assert!(!env.ok(&["get", "action-chunking"]).contains("\nlinks: "));
+    let page = env.ok(&["get", "action-chunking"]);
+    assert!(
+        page.contains("\nlinks: builds_on → arxiv:2410.24164\n"),
+        "{page}"
+    );
     // The alias goes straight to the page; the repo filter keeps only the repo.
     let alias = env.hits(&["chunked actions"]);
     assert_eq!(alias.first().unwrap()["id"], "action-chunking");
