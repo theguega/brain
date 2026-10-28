@@ -308,7 +308,7 @@ fn terms(q: &str) -> Vec<String> {
 }
 
 /// Lowercase words joined by single spaces.
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)

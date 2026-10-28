@@ -3,8 +3,9 @@
 //! makes it match them again.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use crate::chunk::{self, Chunk};
 use crate::doc::Taint;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
-use crate::id::DocId;
+use crate::id::{DocId, Slug};
 use crate::log::Entry;
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
@@ -168,6 +169,60 @@ pub struct Counts {
 
 /// Incremental by content hash; `full` starts from an empty index.
 pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> Result<Counts> {
+    sync(vault, path, full, embedder, true)
+}
+
+/// [`reindex`] without the embedder: `brain tick` fills vectors as its own job (S6).
+pub fn reindex_text(vault: &Vault, path: &Path, embedder: &Embedder) -> Result<Counts> {
+    sync(vault, path, false, embedder, false)
+}
+
+/// Fills the chunks without a vector, stopping once `budget` is spent (after at least one
+/// batch); the rest waits for the next call. The error is the embedder's, after the vectors
+/// it did give.
+pub fn embed(path: &Path, embedder: &Embedder, budget: Duration) -> Result<(usize, Option<Error>)> {
+    let mut ix = Index::open_existing(path)?;
+    Ok(embed_missing(
+        &mut ix,
+        embedder,
+        Some(Instant::now() + budget),
+    ))
+}
+
+/// Held while a reindex or a batch of vectors is written: they would collide on SQLite's
+/// single writer (`database is locked`) whoever started them, a tick or a person.
+fn write_lock(db: &Path) -> Result<File> {
+    let mut name = db.as_os_str().to_owned();
+    name.push(".lock");
+    let path = PathBuf::from(name);
+    let f = io(
+        OpenOptions::new().create(true).append(true).open(&path),
+        &path,
+    )?;
+    io(f.lock(), &path)?;
+    Ok(f)
+}
+
+/// Whether there is an index with docs in it, the one readers need.
+#[must_use]
+pub fn built(path: &Path) -> bool {
+    Index::open_existing(path).is_ok()
+}
+
+/// Chunks without a vector from `model`; none when there is no index yet.
+pub fn unembedded(path: &Path, model: &str) -> Result<usize> {
+    match Index::open_existing(path) {
+        Ok(ix) => missing_vectors(&ix, model),
+        Err(Error::NoIndex) => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool) -> Result<Counts> {
+    if let Some(dir) = path.parent() {
+        io(fs::create_dir_all(dir), dir)?;
+    }
+    let lock = write_lock(path)?;
     if full {
         remove(path)?;
     }
@@ -261,11 +316,14 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
         }
     }
     tx.commit()?;
+    drop(lock);
 
-    let (embedded, err) = embed_missing(&mut ix, embedder);
-    counts.embedded = embedded;
-    if let Some(e) = err {
-        counts.warnings.push(format!("embedder: {e}"));
+    if fill {
+        let (embedded, err) = embed_missing(&mut ix, embedder, None);
+        counts.embedded = embedded;
+        if let Some(e) = err {
+            counts.warnings.push(format!("embedder: {e}"));
+        }
     }
     let count = |sql: &str| -> Result<usize> {
         Ok(ix
@@ -279,6 +337,42 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     counts.unembedded = missing_vectors(&ix, &embedder.model)?;
     counts.repos = count("SELECT count(*) FROM repos")?;
     Ok(counts)
+}
+
+/// Re-reads these pages alone (the ones a merge changed), then fills missing vectors.
+/// Without a built index there is nothing to update: the next reindex builds it.
+pub fn reindex_pages(
+    vault: &Vault,
+    path: &Path,
+    slugs: &[Slug],
+    embedder: &Embedder,
+) -> Result<Vec<String>> {
+    let mut ix = match Index::open_existing(path) {
+        Ok(ix) => ix,
+        Err(Error::NoIndex) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut warnings = Vec::new();
+    let lock = write_lock(path)?;
+    let tx = ix.conn.transaction()?;
+    for slug in slugs {
+        if vault.path(&page::path(slug)).is_file() {
+            match page_source(vault, slug.as_str()) {
+                Ok(s) => {
+                    upsert(&tx, &s)?;
+                }
+                Err(e) => warnings.push(format!("pages/{slug}.md: {e}")),
+            }
+        } else {
+            delete(&tx, slug.as_str())?;
+        }
+    }
+    tx.commit()?;
+    drop(lock);
+    if let (_, Some(e)) = embed_missing(&mut ix, embedder, None) {
+        warnings.push(format!("embedder: {e}"));
+    }
+    Ok(warnings)
 }
 
 /// `true` when the doc was new or changed.
@@ -380,7 +474,11 @@ pub(crate) fn missing_vectors(ix: &Index, model: &str) -> Result<usize> {
 
 /// Fills every chunk that has no vector from the embedder's model, one batch in memory
 /// at a time. Stops at the first embedder failure, keeping the vectors so far.
-fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) {
+fn embed_missing(
+    ix: &mut Index,
+    embedder: &Embedder,
+    deadline: Option<Instant>,
+) -> (usize, Option<Error>) {
     let mut done = 0;
     let mut after = 0_i64;
     loop {
@@ -406,6 +504,12 @@ fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) 
         };
         let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
         let stored = embedder.embed(&texts).and_then(|vs| {
+            // Not held across the request: a reindex waits one batch, not the embedder.
+            let _lock = ix
+                .conn
+                .path()
+                .map(|p| write_lock(Path::new(p)))
+                .transpose()?;
             let tx = ix.conn.transaction()?;
             for ((id, _), v) in batch.iter().zip(&vs) {
                 tx.execute(
@@ -424,6 +528,9 @@ fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) 
         match stored {
             Ok(()) => done += batch.len(),
             Err(e) => return (done, Some(e)),
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return (done, None);
         }
         after = batch.last().map_or(after, |(id, _)| *id);
     }
@@ -606,8 +713,18 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
     })
 }
 
+/// The spans `brain get <id>#<span>` would accept for the doc once indexed, read from the
+/// vault alone: each chunk's heading, in order, so chunk `n` is the `n`th.
+pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
+    Ok(doc_source(vault, &id.dir())?
+        .chunks()
+        .into_iter()
+        .map(|c| c.heading)
+        .collect())
+}
+
 /// `[[target]]`, `[[target|label]]`, `[[target#span]]`, as targets, in order, once each.
-fn wikilinks(body: &str) -> Vec<String> {
+pub(crate) fn wikilinks(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = body;
     while let Some(i) = rest.find("[[") {

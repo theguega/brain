@@ -58,6 +58,9 @@ pub enum Error {
     NoText { id: String, why: String },
     #[error("{0}")]
     Usage(String),
+    /// A run's reply that `brain wiki propose` cannot read.
+    #[error("bad reply on stdin: {0}")]
+    BadReply(String),
     #[error("index: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("no index yet")]
@@ -105,6 +108,10 @@ impl Error {
             Self::Network { .. } | Self::Http { .. } => "retry later".to_owned(),
             Self::Unknown(_) => "check the id on arxiv.org".to_owned(),
             Self::Db(_) => "brain reindex --full".to_owned(),
+            Self::BadReply(_) => {
+                "send `=== page: <slug>` blocks; brain wiki propose --help shows the format"
+                    .to_owned()
+            }
             Self::NoIndex => "brain reindex".to_owned(),
             Self::NoDoc(_) => {
                 "brain find <words>, or brain reindex if it was just added".to_owned()
