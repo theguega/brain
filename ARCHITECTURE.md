@@ -84,6 +84,7 @@ Each contract is a JSON Schema in `brain/contracts/` with a version field. Chang
 | D8 | brain is the only memory. The drover journal moves into `brain log`, and supermemory goes. |
 | D9 | The dashboard is designed in Claude Design and built at step 5. |
 | D10 | The wiki follows Karpathy's LLM Wiki (compile, query, lint), plus cited claims and branch-per-edit review. Omnigraph was considered and rejected: git already gives branches, merge and history over plain files, and the only graph need (C16) fits in SQLite. |
+| D11 | Jobs are cron, lazy or event, all started by `brain tick`, and each serves learn, find or plan. Corrections are learned weekly, after Meta's organizational second brain, and each merged correction becomes an eval question. |
 | Q11 | Tailnet plus Google OAuth. |
 | Q12 | Code knowledge is docs, commits, repo cards and live rg. Summaries only if the eval shows code questions failing. |
 | Q13 | A native adapter per harness. |

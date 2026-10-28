@@ -4,7 +4,7 @@ brain is the knowledge layer: a vault of plain files, an index rebuilt from thos
 
 The repo is paperdb renamed (D2). It holds the Rust crate, `feed/` (Python, the paper and news feed), `planner/` (prompt files), and `contracts/` (JSON Schemas for C1–C16).
 
-Status: design, round 3. Requirements B1–B19, F1–F10, P1–P9.
+Status: design, round 3. Requirements B1–B20, F1–F10, P1–P10.
 
 ## Layers
 
@@ -16,6 +16,44 @@ Status: design, round 3. Requirements B1–B19, F1–F10, P1–P9.
 | feed | candidate pool, ranker, daily selection (C6, C7) | Python (uv) |
 | planner | prompt files and deterministic checks, run through drover | files + Rust |
 | contracts | `contracts/*.schema.json`, golden tests | JSON Schema |
+
+## Jobs: cron, lazy, event (B20)
+
+The brain serves three goals, and every job exists for at least one of them:
+- **Learn:** keep learning and see your progress. What you read becomes cited wiki pages, and your corrections make it better.
+- **Find:** everything you know is searchable from one CLI.
+- **Plan:** the day is proposed, captured and reviewed.
+
+Jobs come in three kinds, so work happens when it's useful and nothing runs just because it's time:
+- **cron:** a fixed local time (C15), for things you expect at a moment of the day.
+- **lazy:** checked by `brain tick` every 15 minutes with a cheap `due` test (a file hash, a queue length, a label count). It runs only when there is work, and does nothing otherwise.
+- **event:** runs right away, inside the command that caused it.
+
+| Job | Kind | When | Does | Model | Serves |
+|---|---|---|---|---|---|
+| feed | cron | 06:00 | fetch, dedupe, rank, select (F1–F10) | free tier, summaries only | Learn |
+| plan | cron | 07:30 weekdays | plan proposal (P1) | reader run | Plan |
+| shutdown | cron | 18:30 | commits, PRs, tasks, runs → `log/` (P5) | none | Plan, Learn |
+| profile | cron | 03:00 | regenerate `profile.md` (C5) | none | Find, Plan |
+| review | cron | Sunday 18:00 | the week: time, focus, progress (P6) | reader run | Plan, Learn |
+| learn | cron | Sunday, before review | corrections → proposals and eval questions (P10) | reader run | Learn, Find |
+| wiki-lint | cron | Sunday, before review | semantic wiki check (P9) | reader run | Find |
+| backup | cron | 02:00 | restic of the vault and state (S4) | none | — |
+| reindex | lazy | the vault's HEAD moved since the last index | incremental reindex (B1) | none | Find |
+| embed | lazy | chunks without vectors, and the GPU is free (S6) | fill vectors (B12) | local embedder | Find |
+| repos | lazy | a registered repo's HEAD moved (C13) | index its markdown, commits and card | none | Find, Plan |
+| compile | lazy | `wiki queue` not empty, 22:00–06:00, ≤5 a night | doc → wiki proposal (P8) | reader run | Learn, Find |
+| ranker | lazy | ≥20 new labels since the last training, once a day at most | retrain and calibrate (F4) | none | Learn |
+| news queries | lazy | `profile.md` changed | regenerate the F10 queries | free tier | Learn |
+| eval | lazy | the retrieval code or `eval/questions.jsonl` changed | recall@8 and tokens (B8) | none | Find |
+| like | event | `brain label <id> like` | `add`, then queue for compile | none | Learn |
+| merge | event | `brain wiki merge` | reindex the changed pages, log, add eval questions | none | Learn, Find |
+| run done | event | `drover done` | journal entry → `brain log` | none | Plan, Learn |
+
+Rules:
+- `brain tick` is the only scheduler: one systemd timer runs it every 15 minutes. It decides what's due and starts reader runs through drover. It calls no model itself.
+- Night and GPU windows keep the model jobs off your working hours and off training runs.
+- Every job that runs appends a C10 line. The tick also appends one line per tick, so a dead tick shows as stale even when no lazy job had work.
 
 ## Vault
 
@@ -116,6 +154,7 @@ Code is never copied. `brain code <q> [--repo]` runs `rg --json` across the regi
 | `brain lint [--vault <dir>]` | schemas, plus the wiki checks | errors and warnings, exit 1 on errors |
 | `brain reindex [--full]` | incremental or full rebuild | counts |
 | `brain eval` | recall@8 and tokens per answer | two numbers, plus a diff against the last run |
+| `brain tick [--dry-run]` | runs every due job once (see Jobs) | `ran[n]{job,ok,took}`; `--dry-run` prints what is due |
 | `brain migrate` | moves the system to a new host (B16) | a checklist |
 
 Output rules:
@@ -168,8 +207,21 @@ Marking a doc is your approval to compile it. Merging is your approval to publis
 
 **Filing answers.** From a chat thread, "file as page" starts a compile run with the thread as input and a `synthesis` page as the target. The same review applies.
 
+**Learning from corrections.** This follows Meta's "organizational second brain" (Meta Engineering, 2026-09-02), scaled down to one person. When you correct an agent ("no, that's wrong", or redirecting a run), the correction is a training signal that today is lost in a transcript. `planner/learn.md` is a weekly reader run over the week's normal chat threads (`chats/`) and drover run transcripts, in two separate steps:
+1. **Extract** each substantive correction, with the brain ids the agent had loaded (its `find` and `get` calls).
+2. **Attribute** it with one test: could the agent have reached the right answer from what it loaded?
+   - No, the knowledge was missing or wrong: a page edit, through `brain wiki propose learn`.
+   - Yes, the procedure was wrong: a suggested edit to a prompt, skill or AGENTS.md, listed in the review for you to apply.
+   - The sources disagree, or it's a judgment call: listed in the review as ambiguous, with no proposal.
+
+A reader can't call drover, so the tick gathers its input first: the week's `chats/` threads, plus each run's text and reply events (C9) exported from drover, written into the run's cwd.
+
+Classifying by the wording of the correction fails, because one remark can be any of the three; Meta found the same. Incognito threads are never read.
+
+**Regression.** Each merged `learn` proposal carries its question, and the merge appends `{q, expect: [page-id], from: correction}` to `eval/questions.jsonl`. `brain eval` then fails any later retrieval change that loses the corrected answer. The check is a deterministic recall test, with no LLM judge.
+
 **Lint.** `brain lint` adds deterministic wiki checks to the schema checks:
-- errors: dead `[[wikilinks]]` or citations, uncited paragraphs in concept or synthesis pages, cited ids missing from `sources[]`, a missing `summary`
+- errors: dead `[[wikilinks]]` or citations, uncited paragraphs in concept or synthesis pages, cited ids missing from `sources[]`, a missing `summary`, a page over 1500 tokens (split it: a page should load whole, which is the progressive-disclosure lesson)
 - warnings: orphan pages (no inbound link), open contradictions older than 14 days, `status: active` pages with no update in 90 days
 
 The semantic pass is `planner/wiki-lint.md`, a weekly `reader` run that looks for stale claims, missing concepts and missing cross-links; its reply goes through `brain wiki propose lint` onto a `wiki/lint-<date>` branch.
@@ -178,7 +230,7 @@ The semantic pass is `planner/wiki-lint.md`, a weekly `reader` run that looks fo
 
 ## Eval (B8)
 
-`eval/questions.jsonl` holds `{q, expect: [id…]}`. `brain eval` runs `find` on each question and reports recall@8 and the mean output tokens per hit. Every real `find` is appended to `~/.local/state/brain/queries.jsonl`, and the eval set is grown from that file by hand. The results are logged per commit, and a retrieval change ships only if recall doesn't drop.
+`eval/questions.jsonl` holds `{q, expect: [id…]}`. `brain eval` runs `find` on each question and reports recall@8 and the mean output tokens per hit. Every real `find` is appended to `~/.local/state/brain/queries.jsonl`, and the eval set grows two ways: by hand from that file, and automatically from every merged correction (see Wiki, Regression). The results are logged per commit, and a retrieval change ships only if recall doesn't drop.
 
 ## feed (Python, `feed/`)
 
@@ -226,8 +278,13 @@ Each item records its `bucket`. Items not shown carry over. Items expire after 2
 These are prompt files, not code (P7):
 - `plan.md` (07:30): reads `brain`, both calendars, `ocu tasks --jsonl`, `gh` issues and PRs, `drover ls`, and yesterday's log.
 - `shutdown` (18:30): deterministic, written in Rust, as `brain shutdown`. It reads commits and PRs across repos, task changes and drover runs, and writes them to `log/`.
-- `review.md` (Sunday): estimated vs actual time, deep-work hours, rollovers, like-rate, AUC, open contradictions.
-- `compile.md` (per queued doc) and `wiki-lint.md` (weekly): `reader` runs whose replies `brain wiki propose` turns into a branch (see Wiki).
+- `review.md` (Sunday), in two parts:
+  - **Plan:** estimated vs actual time, deep-work hours, rollovers.
+  - **Progress:** docs marked, concept pages created or changed (linked, so you can reread what you learned), contradictions opened and resolved, corrections learned and the procedure fixes waiting for you, recall@8 trend, like-rate, AUC.
+  - Counts come from `brain review stats`, which is deterministic; the prompt only writes them up.
+- `compile.md` (per queued doc), `wiki-lint.md` and `learn.md` (weekly): `reader` runs whose replies `brain wiki propose` turns into a branch (see Wiki).
+
+`brain review stats` counts the week from the log, `git log` of the vault, `labels.jsonl` and the eval history, and prints `key: value` lines.
 
 `brain plan checks` computes the challenge checks deterministically: free calendar time vs estimates, WIP above 3, items rolled over 3 or more times, no deep-work block. It prints them as `key: value` lines, which are pasted into the prompt.
 
