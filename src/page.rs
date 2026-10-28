@@ -29,6 +29,9 @@ pub struct Frontmatter {
     /// Other names: an exact match in `find` goes straight to the page.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// Obsidian tags.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }

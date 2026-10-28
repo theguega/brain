@@ -638,6 +638,38 @@ fn a_second_run_changes_nothing_and_new_rows_still_land() {
 }
 
 #[test]
+fn a_non_utf8_reading_is_kept_byte_for_byte_and_found_again() {
+    let dir = tmp();
+    let readings = dir.join("readings");
+    let cafe = b"<title>Caf\xe9</title>";
+    write(&readings.join("cafe.html"), cafe);
+    fs::create_dir_all(dir.join("papers/papers")).unwrap();
+    let v = vault(&dir);
+    let sources = Sources {
+        papers: &dir.join("papers"),
+        journal: None,
+        readings: Some(&readings),
+    };
+    let pdfs = dir.join("pdfs");
+    let first = migrate_paperdb::run(&v, &sources, &pdfs, &now(), NET);
+    assert_eq!(
+        (first.artifacts, first.failed.len()),
+        (1, 0),
+        "{:?}",
+        first.failed
+    );
+    let before = snapshot(v.root());
+    let second = migrate_paperdb::run(&v, &sources, &pdfs, &now(), NET);
+    assert!(second.failed.is_empty(), "{:?}", second.failed);
+    assert_eq!((second.artifacts, second.existing), (0, 1));
+    assert_eq!(snapshot(v.root()), before);
+    let dirs: Vec<_> = fs::read_dir(v.root().join("docs")).unwrap().collect();
+    assert_eq!(dirs.len(), 1);
+    let page = dirs[0].as_ref().unwrap().path().join("index.html");
+    assert_eq!(fs::read(page).unwrap(), cafe);
+}
+
+#[test]
 fn a_changed_source_is_reported_not_applied() {
     let dir = tmp();
     let fx = fixture(&dir);

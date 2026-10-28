@@ -105,6 +105,8 @@ Ids are derived from the source, so an id can never disagree with its content (a
 
 The directory name is the id with `:` replaced by `--`.
 
+A `web:` slug is the canonical URL's host, path and query: `https`, host lowercased without `www.`, no fragment, no tracking params (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref`, `ref_src`), one trailing `/` dropped. A slug over 64 chars, or one another source already holds, ends in `-<sha256[:6]>` of the canonical URL (web) or of the HTML bytes (artifact). `add` finds a source under that id, its hashed form, or the id the older rule gave it, so re-adding never makes a twin. An id stored before its doc exists (a `label skip` or a `link` to a URL) names what the vault holds at that time: if another source takes that id first, the stored id names that doc.
+
 ## Time
 
 Every timestamp is ISO 8601 with its offset, plus the IANA timezone and a place, read from C15 (`~/.local/state/context.json`) at capture time (B15). Displays use the stored zone, not the viewer's. Day boundaries (`log/YYYY-MM-DD.md`, "today") use your current timezone.

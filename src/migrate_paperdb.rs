@@ -19,6 +19,7 @@ use crate::contract::Kind;
 use crate::doc::{Artifact, Card, Doc, Paper, PaperLinks, Tag, Taint};
 use crate::error::{Error, Result, io};
 use crate::id::{ArxivId, DocId, Slug};
+use crate::ingest::Slot;
 use crate::label::{self, Label, Verdict};
 use crate::lineage::{self, Answer};
 use crate::log::{self, Entry};
@@ -201,7 +202,7 @@ fn entry(
     let old: Old = read_json(&dir.join("paper.json"))?;
     let id = match &old.source {
         OldSource::Arxiv(aid) => DocId::Arxiv(aid.clone()),
-        OldSource::Web { url, .. } => DocId::web(url).ok_or_else(|| Error::BadRef(url.clone()))?,
+        OldSource::Web { url, .. } => ingest::web_slot(vault, url)?.id(),
     };
     let text = dir.join("paper.md");
     let pdf = root.join(".cache/pdf").join(format!("{name}.pdf"));
@@ -647,22 +648,20 @@ fn artifact(
     migrated: &BTreeMap<String, DocId>,
     r: &mut Report,
 ) -> Result<()> {
-    let html = String::from_utf8_lossy(&io(fs::read(path), path)?).into_owned();
+    let bytes = io(fs::read(path), path)?;
+    let html = String::from_utf8_lossy(&bytes).into_owned();
     let title = known(&ingest::html_title(&html)).unwrap_or_else(|| {
         path.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
-    let id = DocId::artifact(&title).ok_or_else(|| Error::BadRef(name.clone()))?;
+    let slot = ingest::artifact_slot(vault, &title, &name, "index.html", &bytes)?;
+    let held = matches!(slot, Slot::Held(_));
+    let id = slot.id();
     let dir = Vault::doc_dir(&id);
     let page = dir.join("index.html");
-    if vault.has_doc(&id) {
+    if held {
         r.existing += 1;
-        if vault.read(&page)?.as_deref() != Some(html.as_str()) {
-            r.warnings.push(format!(
-                "{name}: changed since it was migrated as {id}; not migrated again"
-            ));
-        }
     } else if let Some(old) = migrated.get(&name) {
         r.warnings.push(format!(
             "{name}: changed since it was migrated as {old}; not migrated again"
