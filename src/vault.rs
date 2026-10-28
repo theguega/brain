@@ -134,6 +134,18 @@ impl Vault {
         self.write(rel, &s)
     }
 
+    /// Copies a file in, byte for byte, by the same temp-then-rename as every write.
+    pub fn copy(&self, from: &Path, rel: &Path) -> Result<()> {
+        let p = self.path(rel);
+        if let Some(dir) = p.parent() {
+            io(fs::create_dir_all(dir), dir)?;
+        }
+        self.dirty.set(true);
+        let tmp = temp_for(&p);
+        io(fs::copy(from, &tmp), from)?;
+        io(fs::rename(&tmp, &p), &p)
+    }
+
     /// Read, change, rename, under the vault lock, so concurrent updates never lose one.
     /// `f` returns the new contents, or `None` to leave the file alone. `true` if written.
     pub fn update(
@@ -317,13 +329,17 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 /// Write to a sibling temp file named after the target and this process, then rename:
 /// a crash never leaves half a file, and two files in one directory never share a temp.
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    let tmp = temp_for(path);
+    io(fs::write(&tmp, contents), &tmp)?;
+    io(fs::rename(&tmp, path), path)
+}
+
+fn temp_for(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    io(fs::write(&tmp, contents), &tmp)?;
-    io(fs::rename(&tmp, path), path)
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 #[cfg(test)]

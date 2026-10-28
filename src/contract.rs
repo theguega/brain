@@ -36,6 +36,7 @@ impl Kind {
     pub const NOTE: Self = Self("note");
     pub const ARTIFACT: Self = Self("artifact");
     pub const MEETING: Self = Self("meeting");
+    pub const BOOK: Self = Self("book");
 
     pub fn parse(s: &str) -> Result<Self> {
         kinds()
