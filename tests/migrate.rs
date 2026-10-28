@@ -1,5 +1,5 @@
 //! `brain migrate-paperdb` against a fixture library, journal and readings. Papers with
-//! Code is a stub, so nothing here touches the network.
+//! Code and HAL are stubs, so nothing here touches the network.
 
 #![expect(
     clippy::unwrap_used,
@@ -14,8 +14,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use brain::error::Error;
+use brain::hal;
 use brain::id::ArxivId;
-use brain::migrate::{self, Sources};
+use brain::migrate::{self, Lookups, Report, Sources};
 use brain::pwc::{self, Related};
 use brain::time::Now;
 use brain::{Result, Vault, lineage};
@@ -98,6 +99,7 @@ fn pdf(title: &str, author: &str) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// An epub whose spine lists `one.html` before `t[w]o.html` (a name unzip would read as a pattern).
 fn epub(dir: &Path, to: &Path) {
     let src = dir.join("epub-src");
     write(&src.join("mimetype"), "application/epub+zip");
@@ -108,8 +110,8 @@ fn epub(dir: &Path, to: &Path) {
     write(
         &src.join("OEBPS/content.opf"),
         r#"<package><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-            <dc:title>Bottom Up</dc:title><dc:creator>Unknown</dc:creator></metadata>
-            <manifest><item id="b" href="two.html"/><item id="a" href="one.html"/></manifest>
+            <dc:title>Bottom Up</dc:title><dc:creator>Unknown</dc:creator><dc:date>2018-03-01</dc:date></metadata>
+            <manifest><item id="b" href="t[w]o.html#start"/><item id="a" href="one.html"/></manifest>
             <spine><itemref idref="a"/><itemref idref="b"/></spine></package>"#,
     );
     write(
@@ -117,8 +119,12 @@ fn epub(dir: &Path, to: &Path) {
         "<html><body><h1>First</h1><p>Alpha</p></body></html>",
     );
     write(
-        &src.join("OEBPS/two.html"),
+        &src.join("OEBPS/t[w]o.html"),
         "<html><body><p>Omega</p></body></html>",
+    );
+    write(
+        &src.join("OEBPS/tao.html"),
+        "<html><body><p>Wrong member</p></body></html>",
     );
     let ok = Command::new("zip")
         .args(["-q", "-X", "-r"])
@@ -131,47 +137,100 @@ fn epub(dir: &Path, to: &Path) {
     assert!(ok);
 }
 
+fn journal_db(path: &Path, rows: &[(&str, &str, &str, &str)]) {
+    let db = Connection::open(path).unwrap();
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS journal USING fts5(day unindexed, machine unindexed, repo, branch, text);",
+    )
+    .unwrap();
+    for (day, repo, branch, text) in rows {
+        db.execute(
+            "INSERT INTO journal VALUES (?1, 'meerkat', ?2, ?3, ?4)",
+            [day, repo, branch, text],
+        )
+        .unwrap();
+    }
+}
+
 struct Fixture {
     papers: PathBuf,
     journal: PathBuf,
     readings: PathBuf,
 }
 
+impl Fixture {
+    fn sources(&self) -> Sources<'_> {
+        Sources {
+            papers: &self.papers,
+            journal: Some(&self.journal),
+            readings: Some(&self.readings),
+        }
+    }
+}
+
+fn entry(papers: &Path, name: &str, json: Value, text: &str) {
+    write(
+        &papers.join("papers").join(name).join("paper.json"),
+        json.to_string(),
+    );
+    write(&papers.join("papers").join(name).join("paper.md"), text);
+}
+
 fn fixture(dir: &Path) -> Fixture {
     let papers = dir.join("papers");
-    write(
-        &papers.join("papers/2410.24164/paper.json"),
+    entry(
+        &papers,
+        "2410.24164",
         json!({
             "source": {"arxiv": "2410.24164"},
-            "title": "π0: A Vision-Language-Action Flow Model",
+            "title": "$π_0$: A Vision-Language-Action Flow Model",
             "name": "π0",
             "authors": ["Kevin Black"],
             "published": "2024-10-31",
             "abstract": "Flow matching on a VLM.",
             "tags": ["starred", "vla"],
-            "links": ["https://github.com/Physical-Intelligence/openpi", "https://pi.website/blog/pi0"],
+            "links": ["https://github.com/Physical-Intelligence/openpi", "https://pi.website/blog/pi0", "https://pi.website/other"],
+            "keywords": ["vla"],
             "added": "2026-10-02",
-            "card": {"family": "vla", "action_head": "flow-matching", "embodiment": []}
-        })
-        .to_string(),
-    );
-    write(
-        &papers.join("papers/2410.24164/paper.md"),
+            "card": {"family": "vla", "action_head": "flow-matching", "embodiment": []},
+            "rating": 5
+        }),
         "# π0\n\nAction expert.\n",
     );
     write(
         &papers.join(".cache/pdf/2410.24164.pdf"),
         pdf("pi0", "Black"),
     );
-    write(
-        &papers.join("papers/some-blog/paper.json"),
+    entry(
+        &papers,
+        "2501.09747",
         json!({
-            "source": {"web": {"slug": "some-blog", "url": "https://www.example.com/blog/s1", "pdf": null}},
-            "title": "S1", "authors": [], "published": "", "note": "A blog post.", "added": "2026-10-03"
-        })
-        .to_string(),
+            "source": {"arxiv": "2501.09747"}, "title": "FAST: Efficient Action Tokenization",
+            "name": "FAST", "authors": ["Karl Pertsch"], "published": "2025-01-16", "added": "2026-10-02"
+        }),
+        "# FAST\n",
     );
-    write(&papers.join("papers/some-blog/paper.md"), "# S1\n");
+    entry(
+        &papers,
+        "skild-s1",
+        json!({
+            "source": {"web": {"slug": "skild-s1", "url": "https://www.skild.ai/blogs/s1", "pdf": "https://www.skild.ai/blogs/s1"}},
+            "title": "Skild S1", "name": "Skild-S1", "authors": [], "published": "", "note": "A blog post.",
+            "added": "2026-10-03", "card": {"family": "vla"}
+        }),
+        "# S1\n",
+    );
+    entry(
+        &papers,
+        "pinocchio",
+        json!({
+            "source": {"web": {"slug": "pinocchio", "url": "https://laas.hal.science/hal-01866228v2", "pdf": "https://laas.hal.science/hal-01866228v2/document"}},
+            "title": "Pinocchio: fast rigid body dynamics", "name": "Pinocchio", "authors": [], "published": "",
+            "added": "2026-10-02", "card": {"family": "library"}
+        }),
+        "# Pinocchio\n",
+    );
+    write(&papers.join("papers/README"), "not an entry");
     write(
         &papers.join("inbox.jsonl"),
         "{\"id\":\"2608.05674\",\"title\":\"A\",\"published\":\"2026-08-06\",\"found\":\"2026-10-04\",\"state\":\"skipped\"}\n\
@@ -179,19 +238,36 @@ fn fixture(dir: &Path) -> Fixture {
     );
 
     let journal = dir.join("journal.db");
-    let db = Connection::open(&journal).unwrap();
-    db.execute_batch(
-        "CREATE VIRTUAL TABLE journal USING fts5(day unindexed, machine unindexed, repo, branch, text);
-         INSERT INTO journal VALUES ('2026-10-18', 'meerkat', 'drover', 'theo/axi-core', 'what: Made it AXI.\nwhy: Agents parse it.');",
-    )
-    .unwrap();
-    drop(db);
+    journal_db(
+        &journal,
+        &[
+            (
+                "2026-10-18",
+                "drover",
+                "theo/axi-core",
+                "what: Made it AXI.\nwhy: Agents parse it.",
+            ),
+            (
+                "2026-10-18",
+                "drover",
+                "theo/axi-core",
+                "what: Second pass on the same branch.",
+            ),
+            ("2026-10-18", "", "", "what: A row with no repo."),
+        ],
+    );
 
     let readings = dir.join("readings");
     write(
         &readings.join("book.pdf"),
         pdf("A Test Book", "Ada Writer <ada[at]example.org>"),
     );
+    write(
+        &readings.join("copy of book.pdf"),
+        pdf("A Test Book", "Ada Writer <ada[at]example.org>"),
+    );
+    write(&readings.join("hack.pdf"), pdf("hack2e_03.book", "user"));
+    write(&readings.join("broken.epub"), "not a zip");
     epub(dir, &readings.join("bottom.epub"));
     write(
         &readings.join("course.html"),
@@ -207,14 +283,15 @@ fn fixture(dir: &Path) -> Fixture {
     }
 }
 
-fn pi0_pwc(id: &ArxivId) -> Result<Option<pwc::Paper>> {
-    assert_eq!(id.as_str(), "2410.24164");
-    Ok(Some(pwc::Paper {
+/// PwC: π0 has lineage, FAST is unknown (404).
+fn pwc_stub(id: &ArxivId) -> Result<Option<pwc::Paper>> {
+    Ok((id.as_str() == "2410.24164").then(|| pwc::Paper {
         tldr: Some("Flow matching on a VLM.".to_owned()),
+        conference_name: Some("RSS".to_owned()),
+        predecessor_papers: Some(vec![]),
         successor_papers: Some(vec![Related {
             arxiv_id: Some("2504.16054".to_owned()),
         }]),
-        ..pwc::Paper::default()
     }))
 }
 
@@ -225,12 +302,30 @@ fn pwc_down(_: &ArxivId) -> Result<Option<pwc::Paper>> {
     })
 }
 
+fn hal_stub(id: &str) -> Result<Option<hal::Record>> {
+    assert_eq!(id, "hal-01866228");
+    Ok(Some(hal::Record {
+        authors: vec!["Justin Carpentier".to_owned()],
+        date: Some("2019-01-14".to_owned()),
+        venue: Some("SII 2019".to_owned()),
+    }))
+}
+
+fn hal_none(_: &str) -> Result<Option<hal::Record>> {
+    Ok(None)
+}
+
+const NET: Lookups<'static> = Lookups {
+    pwc: &pwc_stub,
+    hal: &hal_stub,
+};
+
 fn meta(v: &Vault, dir: &str) -> Value {
     serde_json::from_str(&fs::read_to_string(v.path(Path::new(dir)).join("meta.json")).unwrap())
         .unwrap()
 }
 
-/// Every file under the vault but `.git`, by relative path.
+/// Every file under `root` but `.git`, by relative path.
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![root.to_owned()];
@@ -253,12 +348,20 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     out
 }
 
-fn lint_clean_but_books(v: &Vault) {
-    let findings = brain::lint::lint(v).unwrap();
-    for f in &findings {
-        let m = meta(v, &f.file.parent().unwrap().to_string_lossy());
-        assert_eq!(m["kind"], "book", "{f:?}");
-    }
+fn books(v: &Vault) -> BTreeMap<String, Value> {
+    fs::read_dir(v.path(Path::new("docs")))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("file--"))
+        .map(|n| {
+            let m = meta(v, &format!("docs/{n}"));
+            (m["source"].as_str().unwrap().to_owned(), m)
+        })
+        .collect()
+}
+
+fn warned(r: &Report, needle: &str) -> bool {
+    r.warnings.iter().any(|w| w.contains(needle))
 }
 
 #[test]
@@ -266,18 +369,13 @@ fn migrates_papers_journal_readings_and_skips() {
     let dir = tmp();
     let fx = fixture(&dir);
     let v = vault(&dir);
-    let src = Sources {
-        papers: &fx.papers,
-        journal: Some(&fx.journal),
-        readings: Some(&fx.readings),
-    };
-    let r = migrate::run(&v, &src, &now(), &pi0_pwc).unwrap();
+    let r = migrate::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(
         (
-            r.papers, r.notes, r.pdfs, r.lineage, r.journal, r.books, r.skips, r.existing
+            r.papers, r.blogs, r.pdfs, r.lineage, r.journal, r.books, r.skips, r.existing
         ),
-        (1, 1, 1, 1, 1, 3, 1, 0),
-        "{r:?}"
+        (3, 1, 1, 1, 3, 4, 1, 0),
+        "{r:#?}"
     );
 
     let p = meta(&v, "docs/arxiv--2410.24164");
@@ -291,12 +389,25 @@ fn migrates_papers_journal_readings_and_skips() {
         p["links"],
         json!({"code": "https://github.com/Physical-Intelligence/openpi", "project": "https://pi.website/blog/pi0"})
     );
+    assert!(warned(
+        &r,
+        "second link of its kind not carried over: https://pi.website/other"
+    ));
+    assert!(warned(
+        &r,
+        "arxiv:2410.24164: paper.json field `rating` not carried over"
+    ));
+    assert_eq!(
+        p["keywords"],
+        json!(["π0", "vla"]),
+        "the name leads the keywords"
+    );
     assert_eq!(p["tldr"], "Flow matching on a VLM.");
+    assert_eq!(p["venue"], "RSS");
     assert_eq!(
         p["lineage"],
         json!([{"src": "arxiv:2504.16054", "dst": "arxiv:2410.24164", "rel": "builds_on"}])
     );
-    assert!(p.get("name").is_none());
     let pi0 = v.path(Path::new("docs/arxiv--2410.24164"));
     assert_eq!(
         fs::read_to_string(pi0.join("text.md")).unwrap(),
@@ -307,18 +418,60 @@ fn migrates_papers_journal_readings_and_skips() {
         fs::read(fx.papers.join(".cache/pdf/2410.24164.pdf")).unwrap()
     );
 
-    let n = meta(&v, "docs/web--example-com-blog-s1");
-    assert_eq!(n["kind"], "note");
-    assert_eq!(n["source"], "https://www.example.com/blog/s1");
-    assert_eq!(n["why"], "A blog post.");
+    let fast = meta(&v, "docs/arxiv--2501.09747");
+    assert!(fast.get("lineage").is_none(), "a PwC 404 is no answer");
+    assert!(
+        fast.get("keywords").is_none(),
+        "FAST is already in the title"
+    );
+
+    let blog = meta(&v, "docs/web--skild-ai-blogs-s1");
+    assert_eq!(
+        (
+            &blog["kind"],
+            &blog["taint"],
+            &blog["date"],
+            &blog["site"],
+            &blog["url"]
+        ),
+        (
+            &json!("blog"),
+            &json!("external"),
+            &json!("2026-10-03"),
+            &json!("skild.ai"),
+            &json!("https://www.skild.ai/blogs/s1")
+        )
+    );
+    assert_eq!(blog["card"]["family"], "vla");
+    assert_eq!(blog["why"], "A blog post.");
+    assert!(warned(&r, "name \"Skild-S1\" not carried over"));
+
+    let pin = meta(&v, "docs/web--laas-hal-science-hal-01866228v2");
+    assert_eq!(pin["kind"], "paper");
+    assert_eq!(pin["authors"], json!(["Justin Carpentier"]));
+    assert_eq!(pin["date"], "2019-01-14");
+    assert_eq!(pin["venue"], "SII 2019");
+    assert_eq!(pin["card"]["family"], "library");
+    assert_eq!(
+        pin["links"]["project"],
+        "https://laas.hal.science/hal-01866228v2"
+    );
+    assert!(warned(
+        &r,
+        "its PDF link https://laas.hal.science/hal-01866228v2/document"
+    ));
+    assert!(warned(&r, "papers/README: not an entry directory"));
 
     let log = v.read(Path::new("log/2026-10-18.md")).unwrap().unwrap();
     assert_eq!(
         log,
         "## 2026-10-18T12:00:00+09:00 · Asia/Tokyo · - · journal · drover theo/axi-core\n\n\
-         what: Made it AXI.\nwhy: Agents parse it.\n"
+         what: Made it AXI.\nwhy: Agents parse it.\n\n\
+         ## 2026-10-18T12:00:00+09:00 · Asia/Tokyo · - · journal · drover theo/axi-core\n\n\
+         what: Second pass on the same branch.\n\n\
+         ## 2026-10-18T12:00:00+09:00 · Asia/Tokyo · - · journal · journal\n\n\
+         what: A row with no repo.\n"
     );
-    assert!(!log.contains("meerkat"));
 
     let labels = v.read(Path::new("labels.jsonl")).unwrap().unwrap();
     assert_eq!(
@@ -326,22 +479,27 @@ fn migrates_papers_journal_readings_and_skips() {
         "{\"id\":\"arxiv:2608.05674\",\"verdict\":\"skip\",\"ts\":\"2026-10-04T12:00:00+09:00\",\"surface\":\"paperdb\"}\n"
     );
 
-    let books: BTreeMap<String, Value> = fs::read_dir(v.path(Path::new("docs")))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|n| n.starts_with("file--"))
-        .map(|n| {
-            let m = meta(&v, &format!("docs/{n}"));
-            (m["source"].as_str().unwrap().to_owned(), m)
-        })
-        .collect();
-    assert_eq!(books.len(), 3);
+    let books = books(&v);
+    assert_eq!(books.len(), 4, "{:?}", books.keys());
+    assert!(
+        r.failed.iter().any(|f| f.starts_with("broken.epub")),
+        "{:?}",
+        r.failed
+    );
+    assert!(warned(&r, "copy of book.pdf: the same file as book.pdf"));
     let pdf = &books["book.pdf"];
     assert_eq!(pdf["kind"], "book");
     assert_eq!(pdf["title"], "A Test Book");
     assert_eq!(pdf["authors"], json!(["Ada Writer"]));
-    assert_eq!(pdf["year"], 2019);
-    assert!(pdf.get("links").is_none());
+    assert!(
+        pdf.get("year").is_none(),
+        "CreationDate is no publication year"
+    );
+    let hack = &books["hack.pdf"];
+    assert!(
+        hack.get("title").is_none() && hack.get("authors").is_none(),
+        "{hack}"
+    );
     let html = &books["course.html"];
     assert_eq!(
         (
@@ -358,7 +516,10 @@ fn migrates_papers_journal_readings_and_skips() {
         )
     );
     let ep = &books["bottom.epub"];
-    assert_eq!(ep["title"], "Bottom Up");
+    assert_eq!(
+        (&ep["title"], &ep["year"]),
+        (&json!("Bottom Up"), &json!(2018))
+    );
     assert!(ep.get("authors").is_none(), "Unknown is no author");
     for (src, m) in &books {
         let d = v.path(&Path::new("docs").join(m["id"].as_str().unwrap().replace(':', "--")));
@@ -374,40 +535,46 @@ fn migrates_papers_journal_readings_and_skips() {
             _ => "Riccati.",
         };
         assert!(text.contains(want), "{src}: {text}");
+        if ext == "epub" {
+            assert!(
+                text.find("Alpha") < text.find("Omega"),
+                "spine order: {text}"
+            );
+            assert!(!text.contains("Wrong member"), "{text}");
+        }
     }
-    let ep_text = fs::read_to_string(
-        v.path(&Path::new("docs").join(ep["id"].as_str().unwrap().replace(':', "--")))
-            .join("text.md"),
-    )
-    .unwrap();
-    assert!(ep_text.find("Alpha") < ep_text.find("Omega"), "spine order");
     let mut missing: Vec<String> = r.missing.iter().map(|(_, m)| m.join(" ")).collect();
     missing.sort();
-    assert_eq!(missing, ["authors year links.home", "links.home"]);
+    assert_eq!(
+        missing,
+        [
+            "authors links.home",
+            "title authors year links.home",
+            "year links.home"
+        ]
+    );
 
-    lint_clean_but_books(&v);
+    for f in brain::lint::lint(&v).unwrap() {
+        let m = meta(&v, &f.file.parent().unwrap().to_string_lossy());
+        assert_eq!(m["kind"], "book", "{f:?}");
+    }
 }
 
 #[test]
-fn a_second_run_changes_nothing() {
+fn a_second_run_changes_nothing_and_new_rows_still_land() {
     let dir = tmp();
     let fx = fixture(&dir);
     let v = vault(&dir);
-    let src = Sources {
-        papers: &fx.papers,
-        journal: Some(&fx.journal),
-        readings: Some(&fx.readings),
-    };
-    let first = migrate::run(&v, &src, &now(), &pi0_pwc).unwrap();
+    let first = migrate::run(&v, &fx.sources(), &now(), NET);
     let before = snapshot(v.root());
     let sources = snapshot(&dir.join("papers"));
-    let second = migrate::run(&v, &src, &now(), &pi0_pwc).unwrap();
+    let second = migrate::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(snapshot(v.root()), before);
     assert_eq!(snapshot(&dir.join("papers")), sources);
     assert_eq!(
         (
             second.papers,
-            second.notes,
+            second.blogs,
             second.pdfs,
             second.journal,
             second.books,
@@ -415,8 +582,91 @@ fn a_second_run_changes_nothing() {
         ),
         (0, 0, 0, 0, 0, 0)
     );
-    assert_eq!(second.existing, 2 + 3);
+    assert_eq!(second.existing, 4 + 4);
     assert_eq!(second.missing, first.missing);
+    assert!(!warned(&second, "changed since"), "{:?}", second.warnings);
+
+    // drover adds a row on a branch it already wrote about: the new block lands.
+    journal_db(
+        &fx.journal,
+        &[
+            ("2026-10-18", "drover", "theo/axi-core", "what: Third pass."),
+            ("2026-10-18", "drover", "theo/axi-core", "what: Third pass."),
+        ],
+    );
+    let third = migrate::run(&v, &fx.sources(), &now(), NET);
+    assert_eq!(third.journal, 2, "an identical row is a block of its own");
+    let log = v.read(Path::new("log/2026-10-18.md")).unwrap().unwrap();
+    assert_eq!(log.matches("what: Third pass.").count(), 2);
+    assert_eq!(migrate::run(&v, &fx.sources(), &now(), NET).journal, 0);
+}
+
+#[test]
+fn a_changed_source_is_reported_not_applied() {
+    let dir = tmp();
+    let fx = fixture(&dir);
+    let v = vault(&dir);
+    migrate::run(&v, &fx.sources(), &now(), NET);
+    let before = snapshot(v.root());
+    write(
+        &fx.papers.join("papers/2410.24164/paper.md"),
+        "# π0, edited\n",
+    );
+    let mut j: Value = serde_json::from_str(
+        &fs::read_to_string(fx.papers.join("papers/skild-s1/paper.json")).unwrap(),
+    )
+    .unwrap();
+    j["title"] = json!("Skild S1, renamed");
+    write(&fx.papers.join("papers/skild-s1/paper.json"), j.to_string());
+    write(
+        &fx.readings.join("course.html"),
+        "<html><head><title>Edited</title></head></html>",
+    );
+    let r = migrate::run(&v, &fx.sources(), &now(), NET);
+    assert_eq!(snapshot(v.root()), before);
+    assert!(
+        warned(
+            &r,
+            "arxiv:2410.24164: papers/2410.24164 changed since it was migrated (text.md)"
+        ),
+        "{:?}",
+        r.warnings
+    );
+    assert!(warned(
+        &r,
+        "web:skild-ai-blogs-s1: papers/skild-s1 changed since it was migrated (title)"
+    ));
+    assert!(warned(
+        &r,
+        "course.html: changed since it was migrated as file:"
+    ));
+}
+
+#[test]
+fn hal_without_a_record_stays_a_blog() {
+    let dir = tmp();
+    let fx = fixture(&dir);
+    let v = vault(&dir);
+    let src = Sources {
+        papers: &fx.papers,
+        journal: None,
+        readings: None,
+    };
+    let r = migrate::run(
+        &v,
+        &src,
+        &now(),
+        Lookups {
+            pwc: &pwc_stub,
+            hal: &hal_none,
+        },
+    );
+    assert_eq!((r.papers, r.blogs), (2, 2));
+    let pin = meta(&v, "docs/web--laas-hal-science-hal-01866228v2");
+    assert_eq!(
+        (&pin["kind"], &pin["date"]),
+        (&json!("blog"), &json!("2026-10-02"))
+    );
 }
 
 #[test]
@@ -429,24 +679,64 @@ fn lineage_waits_for_papers_with_code_then_reindex_fills_it() {
         journal: None,
         readings: None,
     };
-    let r = migrate::run(&v, &src, &now(), &pwc_down).unwrap();
-    assert_eq!((r.papers, r.lineage), (1, 0));
-    assert!(r.warnings.iter().any(|w| w.contains("reindex will retry")));
+    let down = Lookups {
+        pwc: &pwc_down,
+        hal: &hal_stub,
+    };
+    let r = migrate::run(&v, &src, &now(), down);
+    assert_eq!((r.papers, r.lineage), (3, 0));
+    assert!(warned(&r, "reindex will retry"));
     assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());
 
     let index = dir.join("index.db");
-    let down = lineage::retry(&v, &index, 10, &pwc_down).unwrap();
-    assert_eq!((down.filled, down.pending), (0, 1));
-    assert!(down.warning.is_some());
+    let tried = lineage::retry(&v, &index, 10, &pwc_down).unwrap();
+    assert_eq!((tried.filled, tried.pending), (0, 2));
+    assert!(tried.warning.is_some());
     // Tried within the day: not asked again, even with PwC back.
-    let soon = lineage::retry(&v, &index, 10, &pi0_pwc).unwrap();
-    assert_eq!((soon.filled, soon.pending, soon.warning), (0, 1, None));
+    let soon = lineage::retry(&v, &index, 10, &pwc_stub).unwrap();
+    assert_eq!((soon.filled, soon.pending, soon.warning), (0, 2, None));
 
-    let fresh = lineage::retry(&v, &dir.join("fresh.db"), 10, &pi0_pwc).unwrap();
-    assert_eq!((fresh.filled, fresh.pending), (1, 0));
+    let fresh = dir.join("fresh.db");
+    let back = lineage::retry(&v, &fresh, 10, &pwc_stub).unwrap();
+    assert_eq!(
+        (back.filled, back.pending),
+        (1, 1),
+        "FAST is a 404: still pending"
+    );
     let p = meta(&v, "docs/arxiv--2410.24164");
     assert_eq!(p["lineage"][0]["src"], "arxiv:2504.16054");
-    assert_eq!(p["tldr"], "Flow matching on a VLM.");
-    let none = lineage::retry(&v, &dir.join("fresh.db"), 0, &pwc_down).unwrap();
-    assert_eq!(none, lineage::Retried::default());
+    assert_eq!(
+        (&p["tldr"], &p["venue"]),
+        (&json!("Flow matching on a VLM."), &json!("RSS"))
+    );
+    assert!(meta(&v, "docs/arxiv--2501.09747").get("lineage").is_none());
+}
+
+#[test]
+fn only_a_real_pwc_answer_sets_lineage() {
+    let id = brain::DocId::parse("arxiv:2410.24164").unwrap();
+    assert_eq!(lineage::Answer::of(&id, None).lineage, None, "404");
+    assert_eq!(
+        lineage::Answer::of(&id, Some(pwc::Paper::default())).lineage,
+        None,
+        "{{}}"
+    );
+    let empty = pwc::Paper {
+        predecessor_papers: Some(vec![]),
+        successor_papers: Some(vec![]),
+        ..pwc::Paper::default()
+    };
+    assert_eq!(lineage::Answer::of(&id, Some(empty)).lineage, Some(vec![]));
+}
+
+#[test]
+fn a_failed_copy_leaves_no_temp_file() {
+    let dir = tmp();
+    let v = vault(&dir);
+    assert!(
+        v.copy(&dir.join("absent"), Path::new("docs/x/paper.pdf"))
+            .is_err()
+    );
+    let left: Vec<_> = fs::read_dir(v.path(Path::new("docs/x"))).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
 }

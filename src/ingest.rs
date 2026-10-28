@@ -166,11 +166,11 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     p.links.code = p.links.code.or(ax.code).or(comment_code);
     p.links.project = p.links.project.or(comment_project);
     p.summary = p.summary.or(ax.summary);
-    if let Some(pwc) = pwc {
-        let pwc = pwc.unwrap_or_default();
-        p.lineage = Some(lineage::edges(&id, &pwc));
-        p.venue = pwc.conference_name.filter(|s| !s.is_empty());
-        p.tldr = pwc.tldr.filter(|s| !s.is_empty());
+    if let Some(found) = pwc {
+        let answer = lineage::Answer::of(&id, found);
+        p.lineage = answer.lineage;
+        p.venue = answer.venue;
+        p.tldr = answer.tldr;
     }
 
     let text = paper_text(aid).unwrap_or_else(|e| {

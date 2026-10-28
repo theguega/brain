@@ -9,6 +9,7 @@ pub mod contract;
 pub mod doc;
 pub mod embed;
 pub mod error;
+pub mod hal;
 pub mod hub;
 pub mod id;
 pub mod index;

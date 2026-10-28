@@ -56,6 +56,171 @@
     "date": {
       "type": "string",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "authors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "abstract": {
+      "type": "string",
+      "minLength": 1
+    },
+    "card": {
+      "description": "Structured extraction from the paper text. null, [] or {} means the paper does not say, never a guess.",
+      "type": "object",
+      "properties": {
+        "family": {
+          "enum": [
+            "vla",
+            "wam",
+            "world-model",
+            "diffusion-policy",
+            "rl",
+            "control",
+            "benchmark",
+            "dataset",
+            "library",
+            "other"
+          ]
+        },
+        "backbone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action_head": {
+          "enum": [
+            "flow-matching",
+            "diffusion",
+            "fast-tokens",
+            "ar-bins",
+            "latent",
+            "mlp",
+            null
+          ]
+        },
+        "action_space": {
+          "enum": [
+            "joint",
+            "ee-delta",
+            "ee-abs",
+            "latent",
+            null
+          ]
+        },
+        "chunk_size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "control_hz": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "embodiment": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "hours": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "episodes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "source": {
+              "enum": [
+                "in-house",
+                "OXE",
+                "human-video",
+                "mixed",
+                null
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "eval": {
+          "type": "object",
+          "properties": {
+            "sim": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            },
+            "real": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "open": {
+          "type": "object",
+          "properties": {
+            "weights": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "code": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "data": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "compute": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limits": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "family"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [

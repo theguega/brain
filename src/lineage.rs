@@ -56,23 +56,54 @@ pub fn edges(id: &DocId, pwc: &pwc::Paper) -> Vec<Edge> {
     out
 }
 
-/// Sets `lineage` (empty when PwC knows none) and, if unset, `tldr` on a paper's meta.
-pub fn fill(meta: &mut Value, id: &DocId, pwc: Option<pwc::Paper>) -> Result<()> {
-    let pwc = pwc.unwrap_or_default();
-    let Some(obj) = meta.as_object_mut() else {
-        return Ok(());
-    };
-    let lineage = serde_json::to_value(edges(id, &pwc)).map_err(|source| Error::Decode {
-        what: "lineage",
-        source,
-    })?;
-    obj.insert("lineage".to_owned(), lineage);
-    if let Some(t) = pwc.tldr.filter(|t| !t.is_empty())
-        && !obj.contains_key("tldr")
-    {
-        obj.insert("tldr".to_owned(), Value::String(t));
+/// What a PwC reply adds to a paper.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Answer {
+    /// `None` unless PwC sent its predecessor or successor list: a 404 or an empty
+    /// record is no answer, and the paper is retried.
+    pub lineage: Option<Vec<Edge>>,
+    pub tldr: Option<String>,
+    pub venue: Option<String>,
+}
+
+impl Answer {
+    #[must_use]
+    pub fn of(id: &DocId, found: Option<pwc::Paper>) -> Self {
+        let Some(p) = found else {
+            return Self::default();
+        };
+        let answered = p.predecessor_papers.is_some() || p.successor_papers.is_some();
+        Self {
+            lineage: answered.then(|| edges(id, &p)),
+            tldr: p.tldr.filter(|t| !t.is_empty()),
+            venue: p.conference_name.filter(|v| !v.is_empty()),
+        }
     }
-    Ok(())
+
+    /// Sets `lineage` if answered, and `tldr` and `venue` where unset. `true` if it changed.
+    pub fn fill(self, meta: &mut Value) -> Result<bool> {
+        let Some(obj) = meta.as_object_mut() else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        if let Some(edges) = self.lineage {
+            let v = serde_json::to_value(edges).map_err(|source| Error::Decode {
+                what: "lineage",
+                source,
+            })?;
+            obj.insert("lineage".to_owned(), v);
+            changed = true;
+        }
+        for (k, v) in [("tldr", self.tldr), ("venue", self.venue)] {
+            if let Some(v) = v
+                && !obj.contains_key(k)
+            {
+                obj.insert(k.to_owned(), Value::String(v));
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,6 +150,8 @@ pub fn retry(vault: &Vault, index: &Path, limit: usize, lookup: Lookup<'_>) -> R
         )?;
         match lookup(&aid) {
             Ok(found) => {
+                let answer = Answer::of(&id, found);
+                let answered = answer.lineage.is_some();
                 let rel = Vault::doc_dir(&id).join("meta.json");
                 vault.update(&rel, |old| {
                     let Some(old) = old else { return Ok(None) };
@@ -127,11 +160,16 @@ pub fn retry(vault: &Vault, index: &Path, limit: usize, lookup: Lookup<'_>) -> R
                             path: rel.clone(),
                             source,
                         })?;
-                    fill(&mut meta, &id, found)?;
-                    pretty(&meta, &rel).map(Some)
+                    if answer.fill(&mut meta)? {
+                        pretty(&meta, &rel).map(Some)
+                    } else {
+                        Ok(None)
+                    }
                 })?;
-                out.filled += 1;
-                out.pending -= 1;
+                if answered {
+                    out.filled += 1;
+                    out.pending -= 1;
+                }
             }
             Err(e) => out.warning = Some(format!("papers with code: {e}")),
         }

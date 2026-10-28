@@ -14,7 +14,7 @@ use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{Error, Rel, Result, Slug, Vault, lineage, lint, migrate, page, pwc, time, vault};
+use brain::{Error, Rel, Result, Slug, Vault, hal, lineage, lint, migrate, page, pwc, time, vault};
 
 /// brain: the knowledge layer. A vault of plain files in a local git repo, and one CLI.
 ///
@@ -435,19 +435,26 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
                 journal: journal.as_deref(),
                 readings: readings.as_deref(),
             };
-            let r = migrate::run(vault, &src, &time::now()?, &pwc::paper)?;
+            let net = migrate::Lookups {
+                pwc: &pwc::paper,
+                hal: &hal::record,
+            };
+            let r = migrate::run(vault, &src, &time::now()?, net);
             for w in &r.warnings {
                 eprintln!("warning: {w}");
+            }
+            for f in &r.failed {
+                eprintln!("failed: {f}");
             }
             let rows: Vec<Vec<Value>> = r
                 .missing
                 .iter()
                 .map(|(id, m)| vec![json!(id), json!(m.join(" "))])
                 .collect();
-            Reply::Many(vec![
+            let reply = Reply::Many(vec![
                 Reply::Fields(vec![
                     ("papers", json!(r.papers)),
-                    ("notes", json!(r.notes)),
+                    ("blogs", json!(r.blogs)),
                     ("pdfs", json!(r.pdfs)),
                     ("lineage", json!(r.lineage)),
                     ("journal", json!(r.journal)),
@@ -461,7 +468,18 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
                     total: rows.len().to_string(),
                     rows,
                 },
-            ])
+            ]);
+            if !r.failed.is_empty() {
+                print(&render(&reply, false));
+                return Err(Error::Invalid {
+                    path: papers.clone(),
+                    why: format!(
+                        "{} entries, rows or files not migrated (each printed as failed:)",
+                        r.failed.len()
+                    ),
+                });
+            }
+            reply
         }
         Cmd::Lint => return run_lint(vault),
         Cmd::Find { .. }

@@ -1,8 +1,11 @@
 //! `brain migrate-paperdb` (B10): the paperdb library, the drover journal and the
 //! readings become vault docs, log blocks and labels. Sources are only read. Idempotent:
-//! a doc, block or label already in the vault is left alone, so a second run writes nothing.
+//! a doc, block or label already in the vault is left alone, so a second run writes nothing;
+//! a source that changed since is reported, not applied.
+//!
+//! One bad entry, row or file is a failure in the report, never the end of the run.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
@@ -13,15 +16,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::contract::Kind;
-use crate::doc::{Card, Doc, Fields, Paper, PaperLinks, Tag, Taint};
+use crate::doc::{Card, Doc, Paper, PaperLinks, Tag, Taint};
 use crate::error::{Error, Result, io};
 use crate::id::{ArxivId, DocId, Slug};
 use crate::label::{self, Label, Verdict};
-use crate::lineage::{self, Lookup};
+use crate::lineage::{self, Answer};
 use crate::log::{self, Entry};
 use crate::time::Now;
 use crate::vault::{Vault, read_json};
-use crate::{chunk, ingest};
+use crate::{chunk, hal, ingest};
 
 /// paperdb and drover stored days, not times: each becomes noon of that day in the
 /// current zone, which keeps the day whatever zone it is later read in.
@@ -37,15 +40,22 @@ pub struct Sources<'a> {
     pub readings: Option<&'a Path>,
 }
 
+/// The network the migration reads: Papers with Code for arXiv papers, HAL for HAL deposits.
+#[derive(Clone, Copy)]
+pub struct Lookups<'a> {
+    pub pwc: lineage::Lookup<'a>,
+    pub hal: hal::Lookup<'a>,
+}
+
 /// What this run wrote; a second run reports zeros.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
+    /// arXiv papers, and HAL deposits whose record gives authors and a date.
     pub papers: usize,
-    /// Non-arXiv paperdb entries (company blogs, a HAL paper): no authors or date in
-    /// paperdb, so `kind: note` with the URL as `source`.
-    pub notes: usize,
+    /// Other non-arXiv entries: dated by when they entered paperdb.
+    pub blogs: usize,
     pub pdfs: usize,
-    /// Papers PwC answered for; the rest wait for `reindex`.
+    /// Papers PwC sent lineage for; the rest wait for `reindex`.
     pub lineage: usize,
     pub journal: usize,
     pub books: usize,
@@ -54,29 +64,40 @@ pub struct Report {
     pub existing: usize,
     /// Every book, migrated now or before, with the required metadata it still lacks.
     pub missing: Vec<(DocId, Vec<&'static str>)>,
+    /// Data not carried over, or a source that changed since it was migrated.
     pub warnings: Vec<String>,
+    /// Entries, rows or files not migrated at all.
+    pub failed: Vec<String>,
 }
 
-pub fn run(vault: &Vault, src: &Sources<'_>, now: &Now, lookup: Lookup<'_>) -> Result<Report> {
+pub fn run(vault: &Vault, src: &Sources<'_>, now: &Now, net: Lookups<'_>) -> Report {
     let mut r = Report::default();
     let mut pwc_up = true;
-    let papers = src.papers.join("papers");
-    for name in names(&papers)? {
-        paper(vault, src.papers, &name, now, lookup, &mut pwc_up, &mut r)?;
+    match names(&src.papers.join("papers")) {
+        Ok(names) => {
+            for name in names {
+                if let Err(e) = entry(vault, src.papers, &name, now, net, &mut pwc_up, &mut r) {
+                    r.failed.push(format!("papers/{name}: {e}"));
+                }
+            }
+        }
+        Err(e) => r.failed.push(e.to_string()),
     }
-    if let Some(db) = src.journal {
-        journal(vault, db, &now.tz, &mut r)?;
+    if let Some(db) = src.journal
+        && let Err(e) = journal(vault, db, &now.tz, &mut r)
+    {
+        r.failed.push(format!("journal: {e}"));
     }
     if let Some(dir) = src.readings {
-        for name in names(dir)? {
-            book(vault, &dir.join(name), now, &mut r)?;
-        }
+        readings(vault, dir, now, &mut r);
     }
     let inbox = src.papers.join("inbox.jsonl");
-    if inbox.is_file() {
-        skips(vault, &inbox, now, &mut r)?;
+    if inbox.is_file()
+        && let Err(e) = skips(vault, &inbox, now, &mut r)
+    {
+        r.failed.push(format!("inbox.jsonl: {e}"));
     }
-    Ok(r)
+    r
 }
 
 /// `papers/<id>/paper.json` in paperdb.
@@ -84,6 +105,8 @@ pub fn run(vault: &Vault, src: &Sources<'_>, now: &Now, lookup: Lookup<'_>) -> R
 struct Old {
     source: OldSource,
     title: String,
+    #[serde(default)]
+    name: String,
     #[serde(default)]
     authors: Vec<String>,
     #[serde(default)]
@@ -104,121 +127,247 @@ struct Old {
     added: String,
     #[serde(default)]
     card: Option<Card>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum OldSource {
     Arxiv(ArxivId),
-    Web { url: String },
+    /// `slug` was paperdb's id; the vault derives its own from `url`.
+    Web {
+        url: String,
+        pdf: Option<String>,
+    },
 }
 
-fn paper(
+/// A non-arXiv entry with no publication date: a blog post, dated when it entered paperdb.
+#[derive(Serialize)]
+struct Blog {
+    title: String,
+    url: String,
+    site: String,
+    date: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    authors: Vec<String>,
+    #[serde(rename = "abstract", skip_serializing_if = "String::is_empty")]
+    abstract_: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card: Option<Card>,
+}
+
+/// Fields that come from the source alone: what a later run compares to spot a changed source.
+const FROM_SOURCE: &[&str] = &[
+    "title", "tags", "why", "abstract", "summary", "keywords", "links", "card", "url",
+];
+
+fn entry(
     vault: &Vault,
     root: &Path,
     name: &str,
     now: &Now,
-    lookup: Lookup<'_>,
+    net: Lookups<'_>,
     pwc_up: &mut bool,
     r: &mut Report,
 ) -> Result<()> {
     let dir = root.join("papers").join(name);
+    if !dir.is_dir() {
+        r.warnings
+            .push(format!("papers/{name}: not an entry directory; skipped"));
+        return Ok(());
+    }
     let old: Old = read_json(&dir.join("paper.json"))?;
     let id = match &old.source {
         OldSource::Arxiv(aid) => DocId::Arxiv(aid.clone()),
-        OldSource::Web { url } => DocId::web(url).ok_or_else(|| Error::BadRef(url.clone()))?,
+        OldSource::Web { url, .. } => DocId::web(url).ok_or_else(|| Error::BadRef(url.clone()))?,
     };
+    let text = dir.join("paper.md");
+    let pdf = root.join(".cache/pdf").join(format!("{name}.pdf"));
+    let added = noon(&now.tz, &old.added)?;
+    let doc_dir = Vault::doc_dir(&id);
+    let mut doc = convert(&id, &old, added)?;
     if vault.has_doc(&id) {
         r.existing += 1;
+        let mut changed = changed_fields(&vault.path(&doc_dir.join("meta.json")), &doc)?;
+        for (from, to) in [(&text, "text.md"), (&pdf, "paper.pdf")] {
+            let ours = vault.path(&doc_dir.join(to));
+            if from.is_file() && fs::read(from).ok() != fs::read(&ours).ok() {
+                changed.push(to.to_owned());
+            }
+        }
+        if !changed.is_empty() {
+            r.warnings.push(format!(
+                "{id}: papers/{name} changed since it was migrated ({}); not updated",
+                changed.join(", ")
+            ));
+        }
         return Ok(());
     }
-    let doc_dir = Vault::doc_dir(&id);
-    let added = noon(&now.tz, &old.added)?;
-    let why = Some(old.note.clone()).filter(|n| !n.is_empty());
-    let (kind, source) = match &old.source {
-        OldSource::Arxiv(_) => (Kind::PAPER, None),
-        OldSource::Web { url } => (Kind::NOTE, Some(url.clone())),
-    };
+    for url in classify(&old.links).1 {
+        r.warnings.push(format!(
+            "{id}: second link of its kind not carried over: {url}"
+        ));
+    }
+    for key in old.unknown.keys() {
+        r.warnings
+            .push(format!("{id}: paper.json field `{key}` not carried over"));
+    }
+    if let OldSource::Web { url, pdf: Some(p) } = &old.source
+        && p != url
+    {
+        r.warnings
+            .push(format!("{id}: its PDF link {p} is not carried over"));
+    }
+    match &old.source {
+        OldSource::Arxiv(aid) => {
+            if *pwc_up {
+                match (net.pwc)(aid) {
+                    Ok(found) => {
+                        if Answer::of(&id, found).fill(&mut doc.body)? {
+                            r.lineage += usize::from(doc.body.get("lineage").is_some());
+                        }
+                    }
+                    // Down: the rest would fail too, and `reindex` retries them all.
+                    Err(e) => {
+                        *pwc_up = false;
+                        r.warnings
+                            .push(format!("papers with code: {e}; reindex will retry lineage"));
+                    }
+                }
+            }
+            r.papers += 1;
+        }
+        OldSource::Web { url, .. } => match hal::id_of(url).map(|h| (net.hal)(&h)) {
+            Some(Ok(Some(rec))) if !rec.authors.is_empty() && rec.date.is_some() => {
+                doc.kind = Kind::PAPER;
+                doc.body = hal_paper(&old, rec)?;
+                r.papers += 1;
+            }
+            Some(Err(e)) => {
+                r.warnings
+                    .push(format!("{id}: HAL: {e}; migrated as a blog post"));
+                r.blogs += 1;
+            }
+            _ => r.blogs += 1,
+        },
+    }
+    if doc.kind == Kind::BLOG && !old.name.is_empty() && !in_title(&old.name, &old.title) {
+        r.warnings.push(format!(
+            "{id}: name {:?} not carried over (a blog has no keywords)",
+            old.name
+        ));
+    }
     // Text and PDF before meta.json: a doc counts as migrated once its meta exists.
-    let text = dir.join("paper.md");
     if text.is_file() {
         vault.copy(&text, &doc_dir.join("text.md"))?;
     }
-    let pdf = root.join(".cache/pdf").join(format!("{name}.pdf"));
     if pdf.is_file() {
         vault.copy(&pdf, &doc_dir.join("paper.pdf"))?;
         r.pdfs += 1;
     }
-    let body = match &old.source {
-        OldSource::Arxiv(aid) => {
-            r.papers += 1;
-            paper_body(&id, aid, &old, lookup, pwc_up, r)?
-        }
-        OldSource::Web { .. } => {
-            r.notes += 1;
-            let mut body = Fields::new();
-            body.insert("title".to_owned(), old.title.clone().into());
-            Value::Object(body)
-        }
-    };
-    let doc = Doc {
-        taint: Taint::of(kind, &id),
-        id: id.clone(),
-        kind,
-        added,
-        tags: old.tags,
-        why,
-        source,
-        body,
-    };
     vault.write_json(&doc_dir.join("meta.json"), &doc)
 }
 
-fn paper_body(
-    id: &DocId,
-    aid: &ArxivId,
-    old: &Old,
-    lookup: Lookup<'_>,
-    pwc_up: &mut bool,
-    r: &mut Report,
-) -> Result<Value> {
-    let (links, extra) = classify(&old.links);
-    r.warnings.extend(
-        extra
-            .into_iter()
-            .map(|u| format!("{id}: second link of its kind dropped: {u}")),
-    );
-    let mut p = Paper {
+/// The doc paperdb's entry becomes before any network: an arXiv paper, or a blog post.
+fn convert(id: &DocId, old: &Old, added: String) -> Result<Doc<Value>> {
+    let (kind, source, body) = match &old.source {
+        OldSource::Arxiv(_) => (Kind::PAPER, None, to_value(arxiv_paper(old))?),
+        OldSource::Web { url, .. } => {
+            let host = url.split_once("://").map_or(url.as_str(), |(_, r)| r);
+            let host = host.split(['/', '?', '#']).next().unwrap_or(host);
+            let blog = Blog {
+                title: old.title.clone(),
+                url: url.clone(),
+                site: host.strip_prefix("www.").unwrap_or(host).to_owned(),
+                date: old.added.clone(),
+                authors: old.authors.clone(),
+                abstract_: old.abstract_.clone(),
+                card: old.card.clone(),
+            };
+            (Kind::BLOG, Some(url.clone()), to_value(blog)?)
+        }
+    };
+    Ok(Doc {
+        taint: Taint::of(kind, id),
+        id: id.clone(),
+        kind,
+        added,
+        tags: old.tags.clone(),
+        why: Some(old.note.clone()).filter(|n| !n.is_empty()),
+        source,
+        body,
+    })
+}
+
+fn arxiv_paper(old: &Old) -> Paper {
+    let (links, _) = classify(&old.links);
+    Paper {
         title: old.title.clone(),
         authors: old.authors.clone(),
         date: Some(old.published.clone()).filter(|d| !d.is_empty()),
         links,
         abstract_: old.abstract_.clone(),
         summary: Some(old.summary.clone()).filter(|s| !s.is_empty()),
-        keywords: old.keywords.clone(),
+        keywords: keywords(old),
         card: old.card.clone(),
         ..Paper::default()
-    };
-    if *pwc_up {
-        match lookup(aid) {
-            Ok(found) => {
-                let found = found.unwrap_or_default();
-                p.lineage = Some(lineage::edges(id, &found));
-                p.tldr = found.tldr.filter(|t| !t.is_empty());
-                r.lineage += 1;
-            }
-            // Down: the rest would fail too, and `reindex` retries them all.
-            Err(e) => {
-                *pwc_up = false;
-                r.warnings
-                    .push(format!("papers with code: {e}; reindex will retry lineage"));
-            }
-        }
     }
-    serde_json::to_value(p).map_err(|source| Error::Decode {
-        what: "paper",
+}
+
+/// A HAL deposit: authors, date and venue from HAL, the rest from paperdb.
+fn hal_paper(old: &Old, rec: hal::Record) -> Result<Value> {
+    let OldSource::Web { url, .. } = &old.source else {
+        return Err(Error::BadRef(old.title.clone()));
+    };
+    let mut links = classify(&old.links).0;
+    links.project = links.project.or_else(|| Some(url.clone()));
+    to_value(Paper {
+        title: old.title.clone(),
+        authors: rec.authors,
+        date: rec.date,
+        venue: rec.venue,
+        links,
+        abstract_: old.abstract_.clone(),
+        summary: Some(old.summary.clone()).filter(|s| !s.is_empty()),
+        keywords: keywords(old),
+        card: old.card.clone(),
+        ..Paper::default()
+    })
+}
+
+/// paperdb's short name (π0, DP3) leads the keywords, unless the title already says it.
+fn keywords(old: &Old) -> Vec<String> {
+    let mut k = old.keywords.clone();
+    if !old.name.is_empty() && !in_title(&old.name, &old.title) && !k.contains(&old.name) {
+        k.insert(0, old.name.clone());
+    }
+    k
+}
+
+fn in_title(name: &str, title: &str) -> bool {
+    title.to_lowercase().contains(&name.to_lowercase())
+}
+
+fn to_value<T: Serialize>(v: T) -> Result<Value> {
+    serde_json::to_value(v).map_err(|source| Error::Decode {
+        what: "doc",
         source,
     })
+}
+
+/// The [`FROM_SOURCE`] fields where the stored meta and `doc` disagree.
+fn changed_fields(meta: &Path, doc: &Doc<Value>) -> Result<Vec<String>> {
+    let stored: Value = read_json(meta)?;
+    let fresh = to_value(doc)?;
+    // A HAL deposit became a paper after its record came in: its URL moved into links.
+    let rekinded = stored.get("kind") != fresh.get("kind");
+    Ok(FROM_SOURCE
+        .iter()
+        .filter(|k| !(rekinded && matches!(**k, "url" | "links")))
+        .filter(|k| stored.get(**k) != fresh.get(**k))
+        .map(|k| (*k).to_owned())
+        .collect())
 }
 
 /// paperdb's `links[]` by host. A second link for a slot is returned, not stored.
@@ -246,7 +395,8 @@ fn classify(urls: &[String]) -> (PaperLinks, Vec<String>) {
 }
 
 /// drover's journal, an FTS5 table `journal(day, machine, repo, branch, text)`, opened
-/// read-only. The machine is dropped: no hostname in the vault (B16).
+/// read-only. The machine is dropped: no hostname in the vault (B16). A row is in the
+/// vault when its whole block (heading and body) is, as many times as the journal has it.
 fn journal(vault: &Vault, db: &Path, tz: &str, r: &mut Report) -> Result<()> {
     let mut uri = String::from("file:");
     for c in db.to_string_lossy().chars() {
@@ -262,35 +412,67 @@ fn journal(vault: &Vault, db: &Path, tz: &str, r: &mut Report) -> Result<()> {
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )?;
-    let mut stmt = conn.prepare("SELECT day, repo, branch, text FROM journal ORDER BY rowid")?;
+    let mut stmt =
+        conn.prepare("SELECT rowid, day, repo, branch, text FROM journal ORDER BY rowid")?;
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let source = Slug::parse("journal")?;
-    for (day, repo, branch, text) in rows {
-        let at = Now {
-            at: noon(tz, &day)?,
-            tz: tz.to_owned(),
-            place: None,
+    let mut seen: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (rowid, day, repo, branch, text) in rows {
+        let mut block = || -> Result<Option<Entry>> {
+            let at = Now {
+                at: noon(tz, &day)?,
+                tz: tz.to_owned(),
+                place: None,
+            };
+            let title = format!("{repo} {branch}");
+            let title = if title.trim().is_empty() {
+                "journal"
+            } else {
+                title.trim()
+            };
+            let entry = Entry::new(at, source.clone(), &format!("{title}\n{text}"))?;
+            let key = (entry.heading(), entry.body.clone());
+            let wanted = seen.entry(key.clone()).or_default();
+            *wanted += 1;
+            let have = blocks(&vault.read(&entry.file())?.unwrap_or_default())
+                .filter(|b| *b == key)
+                .count();
+            Ok((have < *wanted).then_some(entry))
         };
-        let entry = Entry::new(at, source.clone(), &format!("{repo} {branch}\n{text}"))?;
-        let heading = entry.heading();
-        let there = vault
-            .read(&entry.file())?
-            .is_some_and(|s| s.lines().any(|l| l == heading));
-        if !there {
-            log::append(vault, &entry)?;
-            r.journal += 1;
+        match block() {
+            Ok(Some(entry)) => {
+                log::append(vault, &entry)?;
+                r.journal += 1;
+            }
+            Ok(None) => {}
+            Err(e) => r.failed.push(format!("journal row {rowid}: {e}")),
         }
     }
     Ok(())
+}
+
+/// A log file's blocks as (heading, trimmed body).
+fn blocks(file: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in file.lines() {
+        if log::is_heading(line) {
+            out.push((line.to_owned(), String::new()));
+        } else if let Some((_, body)) = out.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out.into_iter().map(|(h, b)| (h, b.trim().to_owned()))
 }
 
 #[derive(Default, Serialize)]
@@ -310,9 +492,39 @@ struct BookLinks {
     home: String,
 }
 
+fn readings(vault: &Vault, dir: &Path, now: &Now, r: &mut Report) {
+    let names = match names(dir) {
+        Ok(n) => n,
+        Err(e) => return r.failed.push(e.to_string()),
+    };
+    // Books already in the vault by file name: a name now under another hash changed.
+    let mut migrated: BTreeMap<String, DocId> = BTreeMap::new();
+    for d in names_of(&vault.path(Path::new("docs"))) {
+        if let Ok(id @ DocId::File(_)) = DocId::from_dir(&d)
+            && let Ok(m) = read_json::<Value>(&vault.path(&Vault::doc_dir(&id).join("meta.json")))
+            && let Some(src) = m.get("source").and_then(Value::as_str)
+        {
+            migrated.insert(src.to_owned(), id);
+        }
+    }
+    let mut seen: BTreeMap<DocId, String> = BTreeMap::new();
+    for name in names {
+        if let Err(e) = book(vault, &dir.join(&name), now, &migrated, &mut seen, r) {
+            r.failed.push(format!("{name}: {e}"));
+        }
+    }
+}
+
 /// A reading: kept as `source.<ext>`, its text in `text.md`, its metadata only from the
 /// file itself (pdfinfo, the epub's OPF, the html head). Nothing is guessed.
-fn book(vault: &Vault, path: &Path, now: &Now, r: &mut Report) -> Result<()> {
+fn book(
+    vault: &Vault,
+    path: &Path,
+    now: &Now,
+    migrated: &BTreeMap<String, DocId>,
+    seen: &mut BTreeMap<DocId, String>,
+    r: &mut Report,
+) -> Result<()> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -321,15 +533,26 @@ fn book(vault: &Vault, path: &Path, now: &Now, r: &mut Report) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    if !matches!(ext.as_str(), "pdf" | "epub" | "html" | "htm") {
+    if !path.is_file() || !matches!(ext.as_str(), "pdf" | "epub" | "html" | "htm") {
         r.warnings
-            .push(format!("{name}: not a pdf, epub or html; skipped"));
+            .push(format!("{name}: not a pdf, epub or html file; skipped"));
         return Ok(());
     }
     let id = DocId::file(&ingest::sha256(path)?).ok_or_else(|| Error::BadRef(name.clone()))?;
+    if let Some(first) = seen.get(&id) {
+        r.warnings
+            .push(format!("{name}: the same file as {first}, one doc {id}"));
+        return Ok(());
+    }
+    seen.insert(id.clone(), name.clone());
     let dir = Vault::doc_dir(&id);
     if vault.has_doc(&id) {
         r.existing += 1;
+    } else if let Some(old) = migrated.get(&name) {
+        r.warnings.push(format!(
+            "{name}: changed since it was migrated as {old}; not migrated again"
+        ));
+        return Ok(());
     } else {
         let (body, text) = match ext.as_str() {
             "pdf" => (pdf_meta(path)?, ingest::pdf_to_text(path)),
@@ -373,10 +596,18 @@ fn book(vault: &Vault, path: &Path, now: &Now, r: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// A metadata value that says nothing: Calibre writes `Unknown` for no author.
+/// A metadata value that says something. Placeholders count as missing: Calibre's
+/// `Unknown`, a PDF author left at the account name `user`, a title that is the
+/// layout file's name (`hack2e_03.book`).
 fn known(s: &str) -> Option<String> {
+    const PLACEHOLDERS: &[&str] = &["unknown", "user", "untitled", "anonymous", "author"];
+    const LAYOUT_FILES: &[&str] = &[".book", ".indd", ".fm", ".doc", ".docx", ".tex", ".dvi"];
     let s = ingest::squash(s);
-    (!s.is_empty() && !s.eq_ignore_ascii_case("unknown")).then_some(s)
+    let lower = s.to_ascii_lowercase();
+    let says = !s.is_empty()
+        && !PLACEHOLDERS.contains(&lower.as_str())
+        && !LAYOUT_FILES.iter().any(|e| lower.ends_with(e));
+    says.then_some(s)
 }
 
 fn year(s: &str) -> Option<i64> {
@@ -386,13 +617,10 @@ fn year(s: &str) -> Option<i64> {
         .ok()
 }
 
-/// `pdfinfo`'s Title, Author (an `<email>` dropped) and the year of CreationDate.
+/// `pdfinfo`'s Title and Author (an `<email>` dropped). No year: CreationDate is when
+/// the file was made, not when the book was published.
 fn pdf_meta(path: &Path) -> Result<Book> {
-    let out = run_cmd(
-        Command::new("pdfinfo")
-            .args(["-isodates", "-enc", "UTF-8"])
-            .arg(path),
-    )?;
+    let out = run_cmd(Command::new("pdfinfo").args(["-enc", "UTF-8"]).arg(path))?;
     let field = |key: &str| {
         out.lines()
             .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
@@ -402,7 +630,7 @@ fn pdf_meta(path: &Path) -> Result<Book> {
     Ok(Book {
         title: field("Title"),
         authors: author.into_iter().collect(),
-        year: field("CreationDate").as_deref().and_then(year),
+        year: None,
         links: None,
     })
 }
@@ -450,8 +678,9 @@ fn epub(path: &Path) -> Result<(Book, Result<String, String>)> {
         let Some((_, href)) = items.iter().find(|(id, _)| *id == idref) else {
             continue;
         };
+        let href = href.split('#').next().unwrap_or(href);
         let member = if base.is_empty() {
-            (*href).to_owned()
+            href.to_owned()
         } else {
             format!("{base}/{href}")
         };
@@ -579,8 +808,20 @@ fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
+/// One member, named exactly: unzip reads `*`, `?` and `[` in a name as wildcards.
 fn unzip(archive: &Path, member: &str) -> Result<String> {
-    run_cmd(Command::new("unzip").arg("-p").arg(archive).arg(member))
+    let mut exact = String::with_capacity(member.len());
+    for c in member.chars() {
+        match c {
+            '*' | '?' | '[' => {
+                exact.push('[');
+                exact.push(c);
+                exact.push(']');
+            }
+            c => exact.push(c),
+        }
+    }
+    run_cmd(Command::new("unzip").arg("-p").arg(archive).arg(exact))
 }
 
 fn run_cmd(cmd: &mut Command) -> Result<String> {
@@ -646,13 +887,27 @@ fn skips(vault: &Vault, inbox: &Path, now: &Now, r: &mut Report) -> Result<()> {
     Ok(())
 }
 
-/// `<day>T12:00:00±hh:mm` in `tz`, by GNU `date -d`.
+/// `<day>T12:00:00±hh:mm` in `tz`. The offset comes from `date`, GNU (`-d`) or BSD
+/// (`-j -f`), whichever this host has: reading it from the TZif file would mean parsing
+/// the POSIX rule in its footer, which slim zoneinfo files (macOS, recent distros) rely on.
 fn noon(tz: &str, day: &str) -> Result<String> {
-    let s = run_cmd(Command::new("date").env("TZ", tz).args([
-        "-d",
-        &format!("{day} {NOON}"),
-        "+%Y-%m-%dT%H:%M:%S%z",
-    ]))?;
+    let when = format!("{day} {NOON}");
+    const FORMAT: &str = "+%Y-%m-%dT%H:%M:%S%z";
+    let gnu = run_cmd(
+        Command::new("date")
+            .env("TZ", tz)
+            .args(["-d", &when, FORMAT]),
+    );
+    let s = match gnu {
+        Ok(s) => s,
+        Err(_) => run_cmd(Command::new("date").env("TZ", tz).args([
+            "-j",
+            "-f",
+            "%Y-%m-%d %H:%M",
+            &when,
+            FORMAT,
+        ]))?,
+    };
     let s = s.trim();
     match s.split_at_checked(s.len().saturating_sub(2)) {
         Some((head, mm)) if head.len() == 22 && head.starts_with(day) => Ok(format!("{head}:{mm}")),
@@ -660,6 +915,15 @@ fn noon(tz: &str, day: &str) -> Result<String> {
             cmd: "date".to_owned(),
             detail: format!("unexpected output {s:?} for day {day:?}"),
         }),
+    }
+}
+
+/// Entry names of a directory that may not exist yet; none then.
+fn names_of(dir: &Path) -> Vec<String> {
+    if dir.is_dir() {
+        names(dir).unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 

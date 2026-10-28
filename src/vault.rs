@@ -142,8 +142,11 @@ impl Vault {
         }
         self.dirty.set(true);
         let tmp = temp_for(&p);
-        io(fs::copy(from, &tmp), from)?;
-        io(fs::rename(&tmp, &p), &p)
+        let copied = io(fs::copy(from, &tmp), from).and_then(|_| io(fs::rename(&tmp, &p), &p));
+        if copied.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        copied
     }
 
     /// Read, change, rename, under the vault lock, so concurrent updates never lose one.
