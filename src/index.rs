@@ -91,6 +91,11 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("brain/index.db"))
 }
 
+/// `$XDG_CACHE_HOME/brain/pdf`: paper PDFs, a cache since arXiv can serve them again.
+pub fn pdf_dir() -> Result<PathBuf> {
+    Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("brain/pdf"))
+}
+
 /// `$<var>`, else `~/<fallback>`.
 pub(crate) fn xdg(var: &str, fallback: &str) -> Result<PathBuf> {
     match std::env::var_os(var) {

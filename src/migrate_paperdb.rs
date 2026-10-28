@@ -73,13 +73,23 @@ pub struct Report {
     pub failed: Vec<String>,
 }
 
-pub fn run(vault: &Vault, src: &Sources<'_>, now: &Now, net: Lookups<'_>) -> Report {
+/// Paper PDFs go to `pdfs` as `<doc dir>.pdf`, not to the vault: arXiv can serve them again.
+pub fn run(vault: &Vault, src: &Sources<'_>, pdfs: &Path, now: &Now, net: Lookups<'_>) -> Report {
     let mut r = Report::default();
     let mut pwc_misses = 0;
     match names(&src.papers.join("papers")) {
         Ok(names) => {
             for name in names {
-                if let Err(e) = entry(vault, src.papers, &name, now, net, &mut pwc_misses, &mut r) {
+                if let Err(e) = entry(
+                    vault,
+                    src.papers,
+                    pdfs,
+                    &name,
+                    now,
+                    net,
+                    &mut pwc_misses,
+                    &mut r,
+                ) {
                     r.failed.push(format!("papers/{name}: {e}"));
                 }
             }
@@ -165,9 +175,14 @@ const FROM_SOURCE: &[&str] = &[
     "title", "tags", "why", "abstract", "summary", "keywords", "links", "card", "url",
 ];
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site; a struct for it would only rename the arguments"
+)]
 fn entry(
     vault: &Vault,
     root: &Path,
+    pdfs: &Path,
     name: &str,
     now: &Now,
     net: Lookups<'_>,
@@ -189,14 +204,17 @@ fn entry(
     let pdf = root.join(".cache/pdf").join(format!("{name}.pdf"));
     let added = noon(&now.tz, &old.added)?;
     let doc_dir = Vault::doc_dir(&id);
+    let cached = pdfs.join(format!("{}.pdf", id.dir()));
     let mut doc = convert(&id, &old, added)?;
     if vault.has_doc(&id) {
         r.existing += 1;
         let mut changed = changed_fields(&vault.path(&doc_dir.join("meta.json")), &doc)?;
-        for (from, to) in [(&text, "text.md"), (&pdf, "paper.pdf")] {
-            let ours = vault.path(&doc_dir.join(to));
+        for (from, ours, what) in [
+            (&text, vault.path(&doc_dir.join("text.md")), "text.md"),
+            (&pdf, cached.clone(), "pdf"),
+        ] {
             if from.is_file() && fs::read(from).ok() != fs::read(&ours).ok() {
-                changed.push(to.to_owned());
+                changed.push(what.to_owned());
             }
         }
         if !changed.is_empty() {
@@ -270,10 +288,23 @@ fn entry(
         vault.copy(&text, &doc_dir.join("text.md"))?;
     }
     if pdf.is_file() {
-        vault.copy(&pdf, &doc_dir.join("paper.pdf"))?;
+        cache_copy(&pdf, &cached)?;
         r.pdfs += 1;
     }
     vault.write_json(&doc_dir.join("meta.json"), &doc)
+}
+
+/// Copies through a temp file, so a cut copy never passes for the PDF.
+fn cache_copy(from: &Path, to: &Path) -> Result<()> {
+    if let Some(dir) = to.parent() {
+        io(fs::create_dir_all(dir), dir)?;
+    }
+    let tmp = to.with_extension("pdf.tmp");
+    let copied = io(fs::copy(from, &tmp), from).and_then(|_| io(fs::rename(&tmp, to), to));
+    if copied.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    copied
 }
 
 /// The doc paperdb's entry becomes before any network: an arXiv paper, or a blog post.

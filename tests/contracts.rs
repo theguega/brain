@@ -201,6 +201,7 @@ fn missing_required_fields_are_named() {
     let p = problems("paper", Kind::PAPER.schema(), &paper);
     assert!(p.contains(&Problem::Missing("date".to_owned())), "{p:?}");
     let book = doc("file:0a1b2c3d", Kind::parse("book").unwrap(), Fields::new());
+    assert_eq!(book.taint, Taint::External);
     let p = problems("book", Kind::parse("book").unwrap().schema(), &book);
     for f in ["title", "authors", "year", "links"] {
         assert!(p.contains(&Problem::Missing(f.to_owned())), "{f}: {p:?}");

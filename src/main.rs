@@ -470,7 +470,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
                 pwc: &pwc::paper,
                 hal: &hal::record,
             };
-            let r = migrate_paperdb::run(vault, &src, &time::now()?, net);
+            let r = migrate_paperdb::run(vault, &src, &index::pdf_dir()?, &time::now()?, net);
             for w in &r.warnings {
                 eprintln!("warning: {w}");
             }
