@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::index::{self, Index};
 use crate::time::{self, Now};
 use crate::vault::{Vault, git, read_json, write_atomic};
-use crate::{eval, gpu, profile, repos, state};
+use crate::{eval, gpu, lineage, profile, pwc, repos, state};
 
 const STATE: &str = "tick.json";
 const LOCK: &str = "tick.lock";
@@ -250,6 +250,14 @@ impl Ctx<'_> {
     fn exec(&self, name: &str, st: &mut State) -> Result<Done> {
         match name {
             "reindex" | "repos" => {
+                // DESIGN, Kinds: papers PwC has not answered for are retried at the next reindex.
+                if name == "reindex" {
+                    let tried =
+                        lineage::retry(self.vault, &self.db, lineage::PER_REINDEX, &pwc::paper)?;
+                    if let Some(w) = tried.warning {
+                        eprintln!("warning: {w}");
+                    }
+                }
                 let c = index::reindex_text(self.vault, &self.db, &self.embedder)?;
                 for w in &c.warnings {
                     eprintln!("warning: {w}");

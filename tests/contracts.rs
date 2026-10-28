@@ -129,11 +129,11 @@ fn c1_doc_types_match_their_schemas() {
         tldr: Some("Flow matching on a VLM.".to_owned()),
         summary: Some("A VLA.".to_owned()),
         keywords: vec!["vla".to_owned()],
-        lineage: vec![Edge {
+        lineage: Some(vec![Edge {
             src: DocId::parse("arxiv:2504.16054").unwrap(),
             dst: DocId::parse("arxiv:2410.24164").unwrap(),
             rel: Rel::parse("builds_on").unwrap(),
-        }],
+        }]),
         card: Some(card),
     };
     let paper = doc("arxiv:2410.24164", Kind::PAPER, paper);

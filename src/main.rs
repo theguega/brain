@@ -14,7 +14,10 @@ use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{Error, Rel, Result, Slug, Vault, lint, page, time, vault, wiki};
+use brain::{
+    Error, Rel, Result, Slug, Vault, hal, lineage, lint, migrate_paperdb, page, pwc, time, vault,
+    wiki,
+};
 
 mod wiki_cli;
 
@@ -142,11 +145,26 @@ enum Cmd {
     /// Bring the index in line with the vault and the repos; prints counts
     ///
     /// Only docs whose content changed are re-chunked and re-embedded, and chunks still
-    /// without a vector are filled.
+    /// without a vector are filled. A few papers still without Papers with Code lineage
+    /// are retried first.
     Reindex {
         /// Rebuild from nothing
         #[arg(long)]
         full: bool,
+    },
+    /// Copy a paperdb library, the drover journal and a readings directory into the vault
+    ///
+    /// Sources are only read. Running it again changes nothing. Prints what was written,
+    /// then `missing[n]{id,missing}`: the required book metadata no file provided.
+    MigratePaperdb {
+        /// The paperdb library: papers/<id>/, .cache/pdf/, inbox.jsonl
+        papers: PathBuf,
+        /// drover's journal.db, opened read-only
+        #[arg(long, value_name = "DB")]
+        journal: Option<PathBuf>,
+        /// A directory of pdf, epub and html books
+        #[arg(long, value_name = "DIR")]
+        readings: Option<PathBuf>,
     },
     #[command(flatten)]
     Ops(ops::Ops),
@@ -357,16 +375,19 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
             }
         }
         Cmd::Reindex { full } => {
-            let c = index::reindex(
-                &Vault::open(root)?,
-                &index::db_path()?,
-                *full,
-                &Embedder::from_env(),
-            )?;
-            for w in &c.warnings {
+            let vault = Vault::open(root)?;
+            let db = index::db_path()?;
+            let tried = lineage::retry(&vault, &db, lineage::PER_REINDEX, &pwc::paper)?;
+            if let Err(e) = vault.commit_later() {
+                eprintln!("warning: the vault will not autocommit: {e}");
+            }
+            let c = index::reindex(&vault, &db, *full, &Embedder::from_env())?;
+            for w in c.warnings.iter().chain(&tried.warning) {
                 eprintln!("warning: {w}");
             }
             Reply::Fields(vec![
+                ("lineage", json!(tried.filled)),
+                ("no_lineage", json!(tried.pending)),
                 ("docs", json!(c.docs)),
                 ("changed", json!(c.changed)),
                 ("removed", json!(c.removed)),
@@ -434,6 +455,62 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             } else {
                 Reply::Fields(vec![("noop", json!(format!("{what} already there")))])
             }
+        }
+        Cmd::MigratePaperdb {
+            papers,
+            journal,
+            readings,
+        } => {
+            let src = migrate_paperdb::Sources {
+                papers,
+                journal: journal.as_deref(),
+                readings: readings.as_deref(),
+            };
+            let net = migrate_paperdb::Lookups {
+                pwc: &pwc::paper,
+                hal: &hal::record,
+            };
+            let r = migrate_paperdb::run(vault, &src, &time::now()?, net);
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            for f in &r.failed {
+                eprintln!("failed: {f}");
+            }
+            let rows: Vec<Vec<Value>> = r
+                .missing
+                .iter()
+                .map(|(id, m)| vec![json!(id), json!(m.join(" "))])
+                .collect();
+            let reply = Reply::Many(vec![
+                Reply::Fields(vec![
+                    ("papers", json!(r.papers)),
+                    ("blogs", json!(r.blogs)),
+                    ("pdfs", json!(r.pdfs)),
+                    ("lineage", json!(r.lineage)),
+                    ("journal", json!(r.journal)),
+                    ("books", json!(r.books)),
+                    ("skips", json!(r.skips)),
+                    ("existing", json!(r.existing)),
+                ]),
+                Reply::Table {
+                    name: "missing",
+                    cols: &["id", "missing"],
+                    total: rows.len().to_string(),
+                    rows,
+                },
+            ]);
+            if !r.failed.is_empty() {
+                print(&render(&reply, false));
+                return Err(Error::Invalid {
+                    path: papers.clone(),
+                    why: format!(
+                        "{} entries, rows or files not migrated (each printed as failed:)",
+                        r.failed.len()
+                    ),
+                });
+            }
+            reply
         }
         Cmd::Lint => return run_lint(vault),
         Cmd::Find { .. }

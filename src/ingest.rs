@@ -8,12 +8,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::contract::{Kind, Problem, Schema};
-use crate::doc::{Artifact, Doc, Edge, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
+use crate::doc::{Artifact, Doc, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
 use crate::error::{Error, Result, io};
-use crate::id::{ArxivId, DocId, Rel};
+use crate::id::{ArxivId, DocId};
 use crate::time::{self, Now};
 use crate::vault::{Vault, read_json};
-use crate::{alphaxiv, arxiv, hub, net, page, pwc};
+use crate::{alphaxiv, arxiv, hub, lineage, net, page, pwc};
 
 /// Set by brain, never by a file's frontmatter: the envelope of every doc.
 const ENVELOPE: &[&str] = &["id", "kind", "taint", "added", "tags", "why", "source"];
@@ -124,8 +124,8 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
         warnings.push(format!("no alphaXiv extras: {e}"));
         None
     });
-    // PwC down means no lineage yet, not an error.
-    let pwc = pwc::paper(aid).ok().flatten().unwrap_or_default();
+    // PwC down leaves `lineage` unset, not an error: the next reindex retries it.
+    let pwc = pwc::paper(aid).ok();
 
     let (comment_code, comment_project) = entry.as_ref().map_or((None, None), |e| {
         let (code, other): (Vec<&str>, Vec<&str>) =
@@ -166,9 +166,12 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     p.links.code = p.links.code.or(ax.code).or(comment_code);
     p.links.project = p.links.project.or(comment_project);
     p.summary = p.summary.or(ax.summary);
-    p.venue = pwc.conference_name.filter(|s| !s.is_empty());
-    p.tldr = pwc.tldr.filter(|s| !s.is_empty());
-    p.lineage = lineage(&id, pwc.predecessor_papers, pwc.successor_papers);
+    if let Some(found) = pwc {
+        let answer = lineage::Answer::of(&id, found);
+        p.lineage = answer.lineage;
+        p.venue = answer.venue;
+        p.tldr = answer.tldr;
+    }
 
     let text = paper_text(aid).unwrap_or_else(|e| {
         warnings.push(format!("no text: {e}"));
@@ -179,34 +182,6 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     let mut added = write(vault, &doc, text.as_deref().map(|t| ("text.md", t)))?;
     added.warnings = warnings;
     Ok(added)
-}
-
-/// PwC predecessors and successors as `builds_on` edges, whether or not they are in the vault.
-fn lineage(
-    id: &DocId,
-    before: Option<Vec<pwc::Related>>,
-    after: Option<Vec<pwc::Related>>,
-) -> Vec<Edge> {
-    let ids = |v: Option<Vec<pwc::Related>>| {
-        v.unwrap_or_default()
-            .into_iter()
-            .filter_map(|r| ArxivId::parse(&r.arxiv_id?).ok().map(DocId::Arxiv))
-            .collect::<Vec<_>>()
-    };
-    let Ok(rel) = Rel::parse(Rel::BUILDS_ON) else {
-        return Vec::new();
-    };
-    let edge = |src: DocId, dst: DocId| Edge {
-        src,
-        dst,
-        rel: rel.clone(),
-    };
-    let mut out: Vec<Edge> = ids(before)
-        .into_iter()
-        .map(|p| edge(id.clone(), p))
-        .collect();
-    out.extend(ids(after).into_iter().map(|s| edge(s, id.clone())));
-    out
 }
 
 /// Hub markdown when the Hub has it (no PDF needed), else the PDF through the converter chain.
@@ -495,7 +470,7 @@ pub fn pdf_to_text(pdf: &Path) -> Result<String, String> {
 }
 
 /// Hex SHA-256 of a file, by coreutils `sha256sum` or macOS `shasum`.
-fn sha256(path: &Path) -> Result<String> {
+pub(crate) fn sha256(path: &Path) -> Result<String> {
     let mut last = String::new();
     for (bin, args) in [("sha256sum", &[][..]), ("shasum", &["-a", "256"][..])] {
         match Command::new(bin).args(args).arg(path).output() {
@@ -514,7 +489,7 @@ fn sha256(path: &Path) -> Result<String> {
 }
 
 /// Text of `<title>`, entities for `&<>"'` decoded, whitespace collapsed.
-fn html_title(html: &str) -> String {
+pub(crate) fn html_title(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let Some(start) = lower
         .find("<title")
@@ -536,7 +511,7 @@ fn html_title(html: &str) -> String {
     )
 }
 
-fn squash(s: &str) -> String {
+pub(crate) fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

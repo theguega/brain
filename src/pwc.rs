@@ -11,11 +11,14 @@ const API: &str = "https://paperswithcode.co/api/v1/papers";
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Paper {
+    /// Set on every record PwC has; an empty `{}` has none.
+    #[serde(default)]
+    pub arxiv_id: Option<String>,
     #[serde(default)]
     pub tldr: Option<String>,
     #[serde(default)]
     pub conference_name: Option<String>,
-    /// Papers this one builds on.
+    /// Papers this one builds on; `null` when none.
     #[serde(default)]
     pub predecessor_papers: Option<Vec<Related>>,
     /// Papers that build on this one.
