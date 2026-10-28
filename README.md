@@ -25,8 +25,12 @@ requirements in `REQUIREMENTS.md`. Every command and flag is documented in `brai
 
 ```bash
 cargo install --path .
-cp -r skill ~/.claude/skills/brain
+mkdir -p ~/.claude/skills/brain && brain --skill >~/.claude/skills/brain/SKILL.md
 ```
+
+Other machines run brain on the host over ssh: link `bin/brain-ssh` as `brain` on PATH and
+set `BRAIN_HOST` to the host's ssh name. `--skill` is answered locally; every other command
+runs on the host.
 
 Runtime needs `git` and `curl`, `rg` for `brain code`, and an OpenAI-compatible
 embedding server (default `http://localhost:11434/v1/embeddings`, model

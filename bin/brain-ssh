@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run brain on BRAIN_HOST, which holds the vault and index, so a client's agents query the same brain.
+#   BRAIN_HOST=meerkat brain find "flow matching"
+set -euo pipefail
+
+root=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+[[ "${1:-}" == --skill ]] && exec cat "$root/skill/SKILL.md"
+
+host=${BRAIN_HOST:?set BRAIN_HOST to the ssh name of the brain host}
+args=
+for arg in "$@"; do args+=" $(printf '%q' "$arg")"; done
+exec ssh -T "$host" "exec brain$args"

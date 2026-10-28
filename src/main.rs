@@ -37,6 +37,9 @@ struct Cli {
     /// Print compact JSONL, one object per row or value
     #[arg(long, global = true)]
     json: bool,
+    /// Print the agent skill (skill/SKILL.md) and exit
+    #[arg(long, exclusive = true)]
+    skill: bool,
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -237,6 +240,12 @@ fn print(s: &str) {
 }
 
 fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
+    if cli.skill {
+        return Ok((
+            Reply::Text(include_str!("../skill/SKILL.md").to_owned()),
+            ExitCode::SUCCESS,
+        ));
+    }
     let root = match &cli.vault {
         Some(v) => v.clone(),
         None => Vault::default_root()?,
