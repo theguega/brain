@@ -14,7 +14,7 @@ use crate::chunk::{self, Chunk};
 use crate::doc::Taint;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
-use crate::id::DocId;
+use crate::id::{DocId, Slug};
 use crate::log::Entry;
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
@@ -337,6 +337,42 @@ fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool)
     counts.unembedded = missing_vectors(&ix, &embedder.model)?;
     counts.repos = count("SELECT count(*) FROM repos")?;
     Ok(counts)
+}
+
+/// Re-reads these pages alone (the ones a merge changed), then fills missing vectors.
+/// Without a built index there is nothing to update: the next reindex builds it.
+pub fn reindex_pages(
+    vault: &Vault,
+    path: &Path,
+    slugs: &[Slug],
+    embedder: &Embedder,
+) -> Result<Vec<String>> {
+    let mut ix = match Index::open_existing(path) {
+        Ok(ix) => ix,
+        Err(Error::NoIndex) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut warnings = Vec::new();
+    let lock = write_lock(path)?;
+    let tx = ix.conn.transaction()?;
+    for slug in slugs {
+        if vault.path(&page::path(slug)).is_file() {
+            match page_source(vault, slug.as_str()) {
+                Ok(s) => {
+                    upsert(&tx, &s)?;
+                }
+                Err(e) => warnings.push(format!("pages/{slug}.md: {e}")),
+            }
+        } else {
+            delete(&tx, slug.as_str())?;
+        }
+    }
+    tx.commit()?;
+    drop(lock);
+    if let (_, Some(e)) = embed_missing(&mut ix, embedder, None) {
+        warnings.push(format!("embedder: {e}"));
+    }
+    Ok(warnings)
 }
 
 /// `true` when the doc was new or changed.
@@ -677,8 +713,18 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
     })
 }
 
+/// The spans `brain get <id>#<span>` would accept for the doc once indexed, read from the
+/// vault alone: each chunk's heading, in order, so chunk `n` is the `n`th.
+pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
+    Ok(doc_source(vault, &id.dir())?
+        .chunks()
+        .into_iter()
+        .map(|c| c.heading)
+        .collect())
+}
+
 /// `[[target]]`, `[[target|label]]`, `[[target#span]]`, as targets, in order, once each.
-fn wikilinks(body: &str) -> Vec<String> {
+pub(crate) fn wikilinks(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = body;
     while let Some(i) = rest.find("[[") {

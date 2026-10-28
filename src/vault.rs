@@ -153,6 +153,15 @@ impl Vault {
             .map(drop)
     }
 
+    /// Runs `f` under the vault lock once every pending write is committed, so a git
+    /// operation on the vault (a wiki proposal or merge) never races the autosave: the
+    /// pending committer later finds nothing to commit.
+    pub(crate) fn settled<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _lock = lock(&self.root)?;
+        commit(&self.root)?;
+        f()
+    }
+
     /// Commits this process's writes within the delay, without a daemon.
     ///
     /// If no committer is pending (the marker is not locked), this starts `brain` again as
@@ -250,7 +259,14 @@ pub fn run_committer(root: &Path) -> Result<()> {
 }
 
 /// Commits everything pending, if anything is. The caller holds the vault lock.
+/// Refuses during a git merge someone left open: it would commit conflict markers.
 fn commit(root: &Path) -> Result<()> {
+    if root.join(".git/MERGE_HEAD").exists() {
+        return Err(Error::Usage(format!(
+            "a git merge is in progress in {}; finish it or run `git merge --abort` there",
+            root.display()
+        )));
+    }
     git(root, &["add", "-A"])?;
     if git(root, &["diff", "--cached", "--name-only"])?
         .trim()

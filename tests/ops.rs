@@ -513,7 +513,7 @@ fn a_second_tick_while_one_runs_says_so_and_exits_0() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "skipped: tick running\n"
+        "ran[0/0]{job,ok,took}:\nskipped: tick running\n"
     );
     let lines = env.lines("jobs.jsonl");
     assert_eq!(lines.len(), 1);

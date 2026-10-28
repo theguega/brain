@@ -14,7 +14,9 @@ use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{Error, Rel, Result, Slug, Vault, lint, page, time, vault};
+use brain::{Error, Rel, Result, Slug, Vault, lint, page, time, vault, wiki};
+
+mod wiki_cli;
 
 mod ops;
 
@@ -80,7 +82,12 @@ enum Cmd {
         #[arg(value_parser = Rel::parse)]
         rel: Rel,
     },
-    /// Validate every doc and page against its schema; exit 1 on any error
+    /// Validate every doc and page against its schema, plus the wiki checks; exit 1 on errors
+    ///
+    /// Wiki errors: dead [[links]] and [@doc-id] citations, uncited paragraphs or list items
+    /// in concept and synthesis pages outside `## Open questions`, cited ids missing from
+    /// sources[], pages over 1500 tokens. Warnings, on stderr: orphan pages, contradictions
+    /// open over 14 days, active pages not updated in 90 days.
     Lint,
     /// Hybrid search over docs, pages, the log and repos: BM25 and vectors, fused
     ///
@@ -126,6 +133,11 @@ enum Cmd {
     Pages {
         #[arg(long, value_parser = ["person", "project", "decision", "concept", "synthesis"])]
         kind: Option<String>,
+    },
+    /// The wiki's review loop: queue, proposals, merge
+    Wiki {
+        #[command(subcommand)]
+        cmd: wiki_cli::WikiCmd,
     },
     /// Bring the index in line with the vault and the repos; prints counts
     ///
@@ -224,6 +236,9 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
     }
     if let Some(reply) = read(&root, cmd)? {
         return Ok((reply, ExitCode::SUCCESS));
+    }
+    if let Cmd::Wiki { cmd } = cmd {
+        return wiki_cli::run(&root, cmd);
     }
     if let Cmd::Lint = cmd {
         return run_lint(&Vault::open(&root)?);
@@ -382,6 +397,12 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             added(ingest::add(vault, source, &opts)?)
         }
         Cmd::Log { text, source } => {
+            if source.as_str() == wiki::SOURCE {
+                return Err(Error::Usage(format!(
+                    "source {} is written only by brain wiki merge",
+                    wiki::SOURCE
+                )));
+            }
             let entry = Entry::new(time::now()?, source.clone(), text)?;
             let file = log::append(vault, &entry)?;
             Reply::Fields(vec![("at", json!(entry.at)), ("file", json!(file))])
@@ -420,7 +441,8 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
         | Cmd::Code { .. }
         | Cmd::Pages { .. }
         | Cmd::Reindex { .. }
-        | Cmd::Ops(_) => {
+        | Cmd::Ops(_)
+        | Cmd::Wiki { .. } => {
             return Err(Error::Usage("not a write command".to_owned()));
         }
     };
@@ -461,29 +483,35 @@ fn added(a: Added) -> Reply {
 }
 
 fn run_lint(vault: &Vault) -> Result<(Reply, ExitCode)> {
-    let findings = lint::lint(vault)?;
+    let mut findings = lint::lint(vault)?;
+    let wiki = wiki::check::check(vault)?;
+    findings.extend(wiki.errors);
     let code = if findings.is_empty() {
         ExitCode::SUCCESS
     } else {
         eprintln!(
-            "error: {} schema errors\nnext: fix each file, then run brain lint",
+            "error: {} lint errors\nnext: fix each file, then run brain lint",
             findings.len()
         );
         ExitCode::FAILURE
     };
+    for w in &wiki.warnings {
+        eprintln!("warning: {}: {}", w.file.display(), w.error);
+    }
+    Ok((errors(findings), code))
+}
+
+fn errors(findings: Vec<lint::Finding>) -> Reply {
     let rows = findings
         .into_iter()
         .map(|f| vec![json!(f.file), json!(f.error)])
         .collect::<Vec<_>>();
-    Ok((
-        Reply::Table {
-            name: "errors",
-            cols: &["file", "error"],
-            total: rows.len().to_string(),
-            rows,
-        },
-        code,
-    ))
+    Reply::Table {
+        name: "errors",
+        cols: &["file", "error"],
+        total: rows.len().to_string(),
+        rows,
+    }
 }
 
 fn render(reply: &Reply, json: bool) -> String {

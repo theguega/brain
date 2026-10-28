@@ -31,6 +31,7 @@ pub mod tick;
 pub mod time;
 pub mod tokens;
 pub mod vault;
+pub mod wiki;
 
 pub use error::{Error, Result};
 pub use id::{ArxivId, DocId, Rel, Slug};
