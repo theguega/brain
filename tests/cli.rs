@@ -419,6 +419,62 @@ fn artifacts_with_one_title_get_their_own_docs() {
 }
 
 #[test]
+fn concurrent_adds_of_one_title_never_share_an_id() {
+    let env = Env::new(None);
+    env.ok(&[]);
+    for round in 0..3 {
+        let _ = fs::remove_dir_all(env.vault().join("docs"));
+        let children: Vec<_> = (0..4)
+            .map(|i| {
+                let p = env.write(
+                    &format!("in/{i}.html"),
+                    &format!("<title>Race {round}</title><p>{i}</p>"),
+                );
+                env.cmd("3600")
+                    .args(["add", p.to_str().unwrap()])
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for mut c in children {
+            assert!(c.wait().unwrap().success());
+        }
+        assert_eq!(
+            fs::read_dir(env.vault().join("docs")).unwrap().count(),
+            4,
+            "round {round}"
+        );
+    }
+}
+
+#[test]
+fn a_half_written_artifact_is_completed_not_duplicated() {
+    let env = Env::new(None);
+    let r = env.write("in/r.html", "<title>Report</title><p>q3</p>");
+    env.ok(&["add", r.to_str().unwrap()]);
+    fs::remove_file(env.vault().join("docs/artifact--report/index.html")).unwrap();
+    let out = env.ok(&["add", r.to_str().unwrap()]);
+    assert!(out.starts_with("id: artifact:report\n"), "{out}");
+    assert_eq!(fs::read_dir(env.vault().join("docs")).unwrap().count(), 1);
+    assert!(env.read("docs/artifact--report/index.html").contains("q3"));
+}
+
+#[test]
+fn a_non_utf8_artifact_is_kept_byte_for_byte() {
+    let env = Env::new(None);
+    let p = env.dir.join("in/cafe.html");
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, b"<title>Caf\xe9</title>").unwrap();
+    env.ok(&["add", p.to_str().unwrap()]);
+    assert!(env.ok(&["add", p.to_str().unwrap()]).contains("noop: "));
+    let docs: Vec<_> = fs::read_dir(env.vault().join("docs")).unwrap().collect();
+    assert_eq!(docs.len(), 1);
+    let page = docs[0].as_ref().unwrap().path().join("index.html");
+    assert_eq!(fs::read(page).unwrap(), b"<title>Caf\xe9</title>");
+}
+
+#[test]
 fn add_meeting_reads_its_frontmatter() {
     let env = Env::new(Some(("Europe/Paris", "Paris")));
     let notes = env.write(

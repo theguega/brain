@@ -235,14 +235,26 @@ impl Rel {
 /// Query params that track a click rather than name a page, besides `utm_*`.
 const TRACKING: &[&str] = &["fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src"];
 
-/// The URL as `https://`, without `www.`, its fragment and tracking params; the other
-/// params keep their order.
+/// The URL as `https://`, host lowercased and without `www.`, without its fragment,
+/// tracking params and one trailing `/` on a path; the other params keep their order.
 #[must_use]
 pub fn canonical_url(url: &str) -> String {
     let url = url.split_once('#').map_or(url, |(u, _)| u);
-    let url = format!("https://{}", host_path(url));
-    let Some((base, query)) = url.split_once('?') else {
-        return url;
+    let url = url.split_once("://").map_or(url, |(_, r)| r);
+    let (base, query) = url
+        .split_once('?')
+        .map_or((url, None), |(b, q)| (b, Some(q)));
+    let (host, path) = base.find('/').map_or((base, ""), |i| base.split_at(i));
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    let path = if path.len() > 1 {
+        path.strip_suffix('/').unwrap_or(path)
+    } else {
+        path
+    };
+    let base = format!("https://{host}{path}");
+    let Some(query) = query else {
+        return base;
     };
     let kept: Vec<&str> = query
         .split('&')
@@ -400,6 +412,12 @@ mod tests {
             "https://x.com/a"
         );
         assert_eq!(canonical_url("http://www.x.com/a"), "https://x.com/a");
+        assert_eq!(
+            canonical_url("https://WWW.Example.com/Post/"),
+            "https://example.com/Post"
+        );
+        assert_eq!(canonical_url("https://x.com/a/?b=1"), "https://x.com/a?b=1");
+        assert_eq!(canonical_url("https://x.com/"), "https://x.com/");
         assert_eq!(
             canonical_url("https://x.com/a?b=1&a=2"),
             "https://x.com/a?b=1&a=2"

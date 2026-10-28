@@ -114,7 +114,16 @@ impl Vault {
         }
     }
 
-    pub fn write(&self, rel: &Path, contents: &str) -> Result<()> {
+    pub fn read_bytes(&self, rel: &Path) -> Result<Option<Vec<u8>>> {
+        let p = self.path(rel);
+        match fs::read(&p) {
+            Ok(b) => Ok(Some(b)),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => io(Err(e), &p),
+        }
+    }
+
+    pub fn write(&self, rel: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
         let p = self.path(rel);
         if let Some(dir) = p.parent() {
             io(fs::create_dir_all(dir), dir)?;
@@ -166,6 +175,12 @@ impl Vault {
     pub fn append(&self, rel: &Path, text: &str) -> Result<()> {
         self.update(rel, |old| Ok(Some(old.unwrap_or_default() + text)))
             .map(drop)
+    }
+
+    /// Runs `f` under the vault lock. `f` must not take it again: that would deadlock.
+    pub(crate) fn locked<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _lock = lock(&self.root)?;
+        f()
     }
 
     /// Runs `f` under the vault lock once every pending write is committed, so a git
@@ -347,7 +362,7 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 
 /// Write to a sibling temp file named after the target and this process, then rename:
 /// a crash never leaves half a file, and two files in one directory never share a temp.
-pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     let tmp = temp_for(path);
     io(fs::write(&tmp, contents), &tmp)?;
     io(fs::rename(&tmp, path), path)

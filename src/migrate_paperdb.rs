@@ -648,13 +648,14 @@ fn artifact(
     migrated: &BTreeMap<String, DocId>,
     r: &mut Report,
 ) -> Result<()> {
-    let html = String::from_utf8_lossy(&io(fs::read(path), path)?).into_owned();
+    let bytes = io(fs::read(path), path)?;
+    let html = String::from_utf8_lossy(&bytes).into_owned();
     let title = known(&ingest::html_title(&html)).unwrap_or_else(|| {
         path.file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     });
-    let slot = ingest::artifact_slot(vault, &title, "index.html", &html)?;
+    let slot = ingest::artifact_slot(vault, &title, &name, "index.html", &bytes)?;
     let held = matches!(slot, Slot::Held(_));
     let id = slot.id();
     let dir = Vault::doc_dir(&id);
