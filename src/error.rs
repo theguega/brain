@@ -58,6 +58,14 @@ pub enum Error {
     NoText { id: String, why: String },
     #[error("{0}")]
     Usage(String),
+    #[error("index: {0}")]
+    Db(#[from] rusqlite::Error),
+    #[error("no index yet")]
+    NoIndex,
+    #[error("no doc or page {0:?} in the index")]
+    NoDoc(String),
+    #[error("{id} has no such span")]
+    NoSpan { id: String, spans: String },
 }
 
 impl Error {
@@ -96,6 +104,12 @@ impl Error {
             }
             Self::Network { .. } | Self::Http { .. } => "retry later".to_owned(),
             Self::Unknown(_) => "check the id on arxiv.org".to_owned(),
+            Self::Db(_) => "brain reindex --full".to_owned(),
+            Self::NoIndex => "brain reindex".to_owned(),
+            Self::NoDoc(_) => {
+                "brain find <words>, or brain reindex if it was just added".to_owned()
+            }
+            Self::NoSpan { id, spans } => format!("brain get {id}#<span>, with a span of {spans}"),
             _ => "brain --help".to_owned(),
         }
     }
