@@ -17,6 +17,7 @@ pub mod check;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +33,10 @@ use crate::time::Now;
 use crate::vault::{Vault, git};
 
 const PREFIX: &str = "wiki/";
+/// The log source of merge blocks, which the queue reads; no other writer may use it.
+pub const SOURCE: &str = "compile";
+/// The most a reply may hold; pages are capped at 1500 tokens each.
+pub const MAX_REPLY: u64 = 1 << 20;
 const TRAILER: &str = "Brain-Question";
 pub const QUESTIONS: &str = "eval/questions.jsonl";
 
@@ -156,10 +161,7 @@ enum Block {
 }
 
 pub fn parse_reply(text: &str) -> Result<Reply> {
-    let bad = |why: String| Error::Invalid {
-        path: PathBuf::from("<stdin>"),
-        why,
-    };
+    let bad = Error::BadReply;
     let mut blocks: Vec<(Block, Vec<&str>)> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let Some(header) = line.strip_prefix("=== ") else {
@@ -255,7 +257,7 @@ pub fn propose(vault: &Vault, target: &Target, reply: &Reply, day: &str) -> Resu
                 "{branch} is already proposed; merge or drop it first"
             )));
         }
-        let wt = Worktree::add(root)?;
+        let wt = Worktree::add(root, "HEAD")?;
         let tree = Vault::open(&wt.dir)?;
         let files: BTreeSet<PathBuf> = reply.pages.iter().map(|(s, _)| page::path(s)).collect();
         for (slug, text) in &reply.pages {
@@ -304,11 +306,20 @@ struct Worktree<'a> {
 }
 
 impl<'a> Worktree<'a> {
-    fn add(repo: &'a Path) -> Result<Self> {
-        let dir = index::xdg("XDG_CACHE_HOME", ".cache")?
-            .join("brain/worktrees")
-            .join(format!("wiki-{}", std::process::id()));
-        // Left over by a killed run with the same pid.
+    /// The caller holds the vault lock, so any worktree of ours still registered was left
+    /// by a killed run: it is removed first.
+    fn add(repo: &'a Path, commit: &str) -> Result<Self> {
+        let base = index::xdg("XDG_CACHE_HOME", ".cache")?.join("brain/worktrees");
+        let dir = base.join(format!("wiki-{}", std::process::id()));
+        let real = fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+        for line in git(repo, &["worktree", "list", "--porcelain"])?.lines() {
+            if let Some(stale) = line.strip_prefix("worktree ")
+                && Path::new(stale).starts_with(&real)
+            {
+                // Already gone from disk: the prune below unregisters it.
+                let _ = git(repo, &["worktree", "remove", "--force", stale]);
+            }
+        }
         if dir.exists() {
             io(fs::remove_dir_all(&dir), &dir)?;
         }
@@ -319,7 +330,7 @@ impl<'a> Worktree<'a> {
         let wt = Self { repo, dir };
         git(
             repo,
-            &["worktree", "add", "-q", "--detach", wt.path()?, "HEAD"],
+            &["worktree", "add", "-q", "--detach", wt.path()?, commit],
         )?;
         Ok(wt)
     }
@@ -376,33 +387,36 @@ pub fn ls(vault: &Vault) -> Result<Vec<Open>> {
     Ok(out)
 }
 
-/// The pages the branch changes since it left the vault's branch.
-fn changed_pages(root: &Path, branch: &Branch) -> Result<Vec<Slug>> {
+/// The pages the branch changes since it left the vault's branch, or the first file it
+/// changes that is not a page.
+fn changed(root: &Path, branch: &Branch) -> Result<Result<Vec<Slug>, String>> {
     let range = format!("HEAD...{branch}");
-    let names = git(root, &["diff", "--name-only", &range, "--", "pages/"])?;
-    Ok(names
-        .lines()
-        .filter_map(|n| n.strip_prefix("pages/")?.strip_suffix(".md"))
-        .filter_map(|s| Slug::parse(s).ok())
-        .collect())
+    let names = git(root, &["diff", "--name-only", "--no-renames", &range])?;
+    let mut pages = Vec::new();
+    for name in names.lines() {
+        match name
+            .strip_prefix("pages/")
+            .and_then(|n| n.strip_suffix(".md"))
+            .and_then(|s| Slug::parse(s).ok())
+        {
+            Some(slug) => pages.push(slug),
+            None => return Ok(Err(name.to_owned())),
+        }
+    }
+    Ok(Ok(pages))
 }
 
-/// The branch's page diff against the vault's branch.
+/// The pages the branch changes, for `ls`; `diff` shows any other file and merge refuses it.
+fn changed_pages(root: &Path, branch: &Branch) -> Result<Vec<Slug>> {
+    Ok(changed(root, branch)?.unwrap_or_default())
+}
+
+/// The branch's diff against the vault's branch: its pages, and anything it should not touch.
 pub fn diff(vault: &Vault, branch: &Branch) -> Result<String> {
     let root = vault.root();
     branch.require(root)?;
     let range = format!("HEAD...{branch}");
-    git(
-        root,
-        &[
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            &range,
-            "--",
-            "pages/",
-        ],
-    )
+    git(root, &["diff", "--no-color", "--no-ext-diff", &range])
 }
 
 pub fn drop_branch(vault: &Vault, branch: &Branch) -> Result<()> {
@@ -421,16 +435,22 @@ pub enum Merged {
         questions: usize,
         warnings: Vec<String>,
     },
-    /// The merge was aborted and the branch dropped; its doc is back in the queue.
+    /// Nothing landed. A doc's branch was dropped and the doc is back in the queue; a
+    /// lint or learn branch is kept, for you to rebase or drop.
     Conflict {
         pages: Vec<Slug>,
         files: Vec<String>,
         requeued: Option<DocId>,
     },
+    /// The merged pages fail lint (the vault moved since the proposal); nothing landed.
+    Rejected(Vec<Finding>),
 }
 
-/// Merges the branch into the vault's branch, reindexes its pages into `db`, logs a
-/// `compile` block, and adds a learn proposal's questions to the eval set.
+/// Merges the branch into the vault's branch, with its `compile` log block and a learn
+/// proposal's eval questions in the same commit, then reindexes its pages into `db`.
+///
+/// The merge is built off the checkout (`git merge-tree`, `commit-tree`) and lands by
+/// fast-forward, so a conflict or a kill never leaves the vault mid-merge.
 pub fn merge(
     vault: &Vault,
     branch: &Branch,
@@ -441,59 +461,134 @@ pub fn merge(
     let root = vault.root();
     let landed = vault.settled(|| {
         branch.require(root)?;
-        let pages = changed_pages(root, branch)?;
+        let pages = match changed(root, branch)? {
+            Ok(pages) => pages,
+            Err(file) => {
+                return Err(Error::Usage(format!(
+                    "{branch} changes {file}, outside pages/; only `brain wiki drop {branch}` applies"
+                )));
+            }
+        };
+        let tree = match merge_tree(root, branch)? {
+            Ok(tree) => tree,
+            Err(files) => {
+                let requeued = branch.doc();
+                if requeued.is_some() {
+                    git(root, &["branch", "-D", branch.as_str()])?;
+                }
+                return Ok(Err(Merged::Conflict {
+                    pages,
+                    files,
+                    requeued,
+                }));
+            }
+        };
+        let msg = format!("wiki: merge {branch}");
+        let commit = git(
+            root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit-tree",
+                &tree,
+                "-p",
+                "HEAD",
+                "-p",
+                branch.as_str(),
+                "-m",
+                &msg,
+            ],
+        )?;
+        let wt = Worktree::add(root, commit.trim())?;
+        let merged = Vault::open(&wt.dir)?;
+        let files: BTreeSet<PathBuf> = pages.iter().map(page::path).collect();
+        let mut errors = lint::lint(&merged)?;
+        errors.extend(check::check(&merged)?.errors);
+        errors.retain(|f| files.contains(&f.file));
+        if !errors.is_empty() {
+            return Ok(Err(Merged::Rejected(errors)));
+        }
         let questions = if branch.is_learn() {
             questions(root, branch)?
         } else {
             Vec::new()
         };
-        let msg = format!("wiki: merge {branch}");
-        let merged = git(
-            root,
-            &[
-                "-c",
-                "commit.gpgsign=false",
-                "merge",
-                "--no-ff",
-                "-q",
-                "-m",
-                &msg,
-                branch.as_str(),
-            ],
-        );
-        if let Err(e) = merged {
-            let files: Vec<String> = git(root, &["diff", "--name-only", "--diff-filter=U"])?
-                .lines()
-                .map(str::to_owned)
-                .collect();
-            if files.is_empty() {
-                return Err(e);
-            }
-            git(root, &["merge", "--abort"])?;
-            git(root, &["branch", "-D", branch.as_str()])?;
-            return Ok(Err(Merged::Conflict {
-                pages,
-                files,
-                requeued: branch.doc(),
-            }));
-        }
+        record(&merged, branch, &pages, &questions, now)?;
+        let dir = wt.dir.as_path();
+        git(dir, &["add", "-A"])?;
+        git(
+            dir,
+            &["-c", "commit.gpgsign=false", "commit", "-q", "--amend", "--no-edit"],
+        )?;
+        let head = git(dir, &["rev-parse", "HEAD"])?;
+        git(root, &["merge", "--ff-only", "-q", head.trim()])?;
         git(root, &["branch", "-D", branch.as_str()])?;
-        Ok(Ok((pages, questions)))
+        Ok(Ok((pages, questions.len())))
     })?;
     let (pages, questions) = match landed {
         Ok(l) => l,
-        Err(conflict) => return Ok(conflict),
+        Err(other) => return Ok(other),
     };
+    // The merge has landed; the next reindex catches up whatever this one misses.
+    let warnings = index::reindex_pages(vault, db, &pages, embedder)
+        .unwrap_or_else(|e| vec![format!("reindex: {e}")]);
+    Ok(Merged::Clean {
+        pages,
+        questions,
+        warnings,
+    })
+}
 
-    let warnings = index::reindex_pages(vault, db, &pages, embedder)?;
+/// `git merge-tree --write-tree`: the merged tree, or the conflicted files.
+fn merge_tree(root: &Path, branch: &Branch) -> Result<Result<String, Vec<String>>> {
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        "HEAD",
+        branch.as_str(),
+    ];
+    let failed = |detail: String| Error::Command {
+        cmd: format!("git {}", args.join(" ")),
+        detail,
+    };
+    let out = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| failed(e.to_string()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let tree = lines.next().unwrap_or_default().to_owned();
+    match out.status.code() {
+        Some(0) => Ok(Ok(tree)),
+        Some(1) => Ok(Err(lines
+            .take_while(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect())),
+        _ => Err(failed(
+            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        )),
+    }
+}
+
+/// Writes the merge's `compile` log block, and its questions, into the merged tree.
+fn record(
+    merged: &Vault,
+    branch: &Branch,
+    pages: &[Slug],
+    questions: &[Question],
+    now: Now,
+) -> Result<()> {
     let mut text = format!("merged {branch}\n");
     if let Some(id) = branch.doc() {
         text.push_str(&format!("docs: {id}\n"));
     }
     let names: Vec<&str> = pages.iter().map(Slug::as_str).collect();
     text.push_str(&format!("pages: {}\n", names.join(", ")));
-    log::append(vault, &Entry::new(now, Slug::parse("compile")?, &text)?)?;
-    for q in &questions {
+    log::append(merged, &Entry::new(now, Slug::parse(SOURCE)?, &text)?)?;
+    for q in questions {
         let line = serde_json::to_string(&EvalQuestion {
             q: &q.q,
             expect: &q.expect,
@@ -503,13 +598,9 @@ pub fn merge(
             path: QUESTIONS.into(),
             source,
         })?;
-        vault.append(Path::new(QUESTIONS), &format!("{line}\n"))?;
+        merged.append(Path::new(QUESTIONS), &format!("{line}\n"))?;
     }
-    Ok(Merged::Clean {
-        pages,
-        questions: questions.len(),
-        warnings,
-    })
+    Ok(())
 }
 
 /// A line of `eval/questions.jsonl`, in its field order.
@@ -586,7 +677,7 @@ fn compiled(vault: &Vault) -> Result<BTreeSet<DocId>> {
         let mut in_compile = false;
         for line in text.lines() {
             if let Some(e) = Entry::parse_heading(line) {
-                in_compile = e.source.as_str() == "compile";
+                in_compile = e.source.as_str() == SOURCE;
             } else if in_compile && let Some(ids) = line.strip_prefix("docs: ") {
                 out.extend(ids.split(',').filter_map(|s| DocId::parse(s).ok()));
             }

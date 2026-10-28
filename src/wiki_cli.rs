@@ -1,5 +1,6 @@
 //! `brain wiki`: the commands over [`brain::wiki`].
 
+use std::io::Read as _;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -90,10 +91,17 @@ pub(crate) fn run(root: &Path, cmd: &WikiCmd) -> Result<(Reply, ExitCode)> {
         }
         WikiCmd::Diff { branch } => Reply::Text(wiki::diff(&vault, branch)?),
         WikiCmd::Propose { target } => {
-            let text = std::io::read_to_string(std::io::stdin()).map_err(|source| Error::Io {
-                path: "<stdin>".into(),
-                source,
-            })?;
+            let mut text = String::new();
+            std::io::stdin()
+                .take(wiki::MAX_REPLY + 1)
+                .read_to_string(&mut text)
+                .map_err(|source| Error::Io {
+                    path: "<stdin>".into(),
+                    source,
+                })?;
+            if text.len() as u64 > wiki::MAX_REPLY {
+                return Err(Error::BadReply(format!("over {} bytes", wiki::MAX_REPLY)));
+            }
             let reply = wiki::parse_reply(&text)?;
             match wiki::propose(&vault, target, &reply, time::now()?.day())? {
                 Proposed::Branch { branch, pages } => Reply::Fields(vec![
@@ -116,12 +124,8 @@ pub(crate) fn run(root: &Path, cmd: &WikiCmd) -> Result<(Reply, ExitCode)> {
                 time::now()?,
                 &index::db_path()?,
                 &Embedder::from_env(),
-            );
-            // The log block and questions are written even if a later step failed.
-            if let Err(e) = vault.commit_later() {
-                eprintln!("warning: the vault will not autocommit: {e}");
-            }
-            match merged? {
+            )?;
+            match merged {
                 Merged::Clean {
                     pages,
                     questions,
@@ -143,12 +147,12 @@ pub(crate) fn run(root: &Path, cmd: &WikiCmd) -> Result<(Reply, ExitCode)> {
                     requeued,
                 } => {
                     let next = match &requeued {
-                        Some(id) => format!("{id} is back in brain wiki queue"),
-                        None => "propose again from the merged state".to_owned(),
+                        Some(id) => format!("it was dropped, and {id} is back in brain wiki queue"),
+                        None => format!(
+                            "it was kept: rebase it on the vault's branch, or brain wiki drop {branch}"
+                        ),
                     };
-                    eprintln!(
-                        "error: {branch} conflicts with the vault; it was dropped\nnext: {next}"
-                    );
+                    eprintln!("error: {branch} conflicts with the vault\nnext: {next}");
                     let mut fields = vec![
                         ("merged", json!("none")),
                         ("pages", slugs(&pages)),
@@ -158,6 +162,13 @@ pub(crate) fn run(root: &Path, cmd: &WikiCmd) -> Result<(Reply, ExitCode)> {
                         fields.push(("requeued", json!(id.to_string())));
                     }
                     return Ok((Reply::Fields(fields), ExitCode::FAILURE));
+                }
+                Merged::Rejected(findings) => {
+                    eprintln!(
+                        "error: {} lint errors in the merged pages, nothing merged\nnext: brain wiki drop {branch}, then propose again",
+                        findings.len()
+                    );
+                    return Ok((errors(findings), ExitCode::FAILURE));
                 }
             }
         }

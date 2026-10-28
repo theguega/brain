@@ -390,6 +390,12 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             added(ingest::add(vault, source, &opts)?)
         }
         Cmd::Log { text, source } => {
+            if source.as_str() == wiki::SOURCE {
+                return Err(Error::Usage(format!(
+                    "source {} is written only by brain wiki merge",
+                    wiki::SOURCE
+                )));
+            }
             let entry = Entry::new(time::now()?, source.clone(), text)?;
             let file = log::append(vault, &entry)?;
             Reply::Fields(vec![("at", json!(entry.at)), ("file", json!(file))])

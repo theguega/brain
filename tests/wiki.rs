@@ -103,12 +103,8 @@ impl Env {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(reply.as_bytes())
-            .unwrap();
+        // brain stops reading at its cap, so a write past it may meet a closed pipe.
+        let _ = child.stdin.take().unwrap().write_all(reply.as_bytes());
         child.wait_with_output().unwrap()
     }
 
@@ -116,6 +112,7 @@ impl Env {
         let out = Command::new("git")
             .arg("-C")
             .arg(self.vault())
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
             .args(args)
             .output()
             .unwrap();
@@ -178,7 +175,7 @@ fn a_reply_becomes_a_branch_then_lands_reindexed_and_logged() {
         page(
             "Pi0",
             PI0,
-            "Pi0 puts a flow matching action expert on a VLM backbone [@arxiv:2410.24164#2]."
+            "Pi0 puts a flow matching action expert on a VLM backbone [@arxiv:2410.24164#1]."
         )
     );
     let out = env.propose(PI0, &reply);
@@ -224,7 +221,13 @@ fn a_reply_becomes_a_branch_then_lands_reindexed_and_logged() {
             .any(|l| serde_json::from_str::<Value>(l).unwrap()["id"] == "pi0"),
         "{hits}"
     );
-    env.settle();
+    // The log block lands in the merge commit itself, with the page.
+    let landed = env.git(&["diff", "--name-only", "HEAD^1", "HEAD"]);
+    assert!(
+        landed.contains("pages/pi0.md\n") && landed.contains("log/"),
+        "{landed}"
+    );
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
     let day = fs::read_dir(env.vault().join("log"))
         .unwrap()
         .next()
@@ -279,6 +282,7 @@ fn of_two_proposals_on_one_page_the_second_conflicts_and_requeues() {
     );
     assert_eq!(env.git(&["branch", "--list", "wiki/*"]), "");
     assert_eq!(env.git(&["status", "--porcelain"]), "");
+    assert!(!env.vault().join(".git/MERGE_HEAD").exists());
     assert_eq!(
         fs::read_to_string(env.vault().join("pages/pi0.md")).unwrap(),
         first
@@ -319,18 +323,22 @@ fn an_uncited_paragraph_fails_lint_by_line_and_propose_commits_nothing() {
 fn wiki_lint_finds_dead_links_citations_and_unlisted_sources() {
     let env = Env::new();
     env.write(
+        "docs/arxiv--2410.24164/text.md",
+        "# Method\n\nA flow matching action expert.\n",
+    );
+    env.write(
         "pages/pi0.md",
         &page(
             "Pi0",
             PI0,
-            "See [[nowhere]] [@arxiv:2410.24164].\n\n- From [@arxiv:2504.16054].\n- Dead [@arxiv:1111.11111].",
+            "See [[nowhere]] [@arxiv:2410.24164].\n\n- From [@arxiv:2504.16054].\n- Dead [@arxiv:1111.11111].\n- No span [@arxiv:2410.24164#999].\n- A heading [@arxiv:2410.24164#method].",
         ),
     );
     let out = env.run(&["lint"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "errors[3/3]{file,error}:\n  pages/pi0.md,line 11: dead link [[nowhere]]\n  pages/pi0.md,line 13: arxiv:2504.16054 is cited but not in sources[]\n  pages/pi0.md,line 14: dead citation [@arxiv:1111.11111]\n"
+        "errors[4/4]{file,error}:\n  pages/pi0.md,line 11: dead link [[nowhere]]\n  pages/pi0.md,line 13: arxiv:2504.16054 is cited but not in sources[]\n  pages/pi0.md,line 14: dead citation [@arxiv:1111.11111]\n  pages/pi0.md,line 15: dead citation [@arxiv:2410.24164#999]: no such span\n"
     );
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("warning: pages/pi0.md: orphan"), "{err}");
@@ -414,4 +422,194 @@ fn a_merged_learn_proposal_adds_its_question_to_the_eval_set() {
     );
     // A question outside a learn proposal is refused.
     assert_eq!(env.propose(PI05, &reply).status.code(), Some(2));
+}
+
+const REPLY: &str = "=== page: pi0\n";
+
+fn pi0_reply(body: &str) -> String {
+    format!("{REPLY}{}", page("Pi0", &format!("{PI0}, {PI05}"), body))
+}
+
+#[test]
+fn a_branch_that_touches_anything_but_pages_is_refused() {
+    let env = Env::new();
+    assert!(
+        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+            .status
+            .success()
+    );
+    // Hand-edit the proposal: delete a doc, replace labels, ignore everything.
+    env.git(&["checkout", "-q", "wiki/arxiv--2410.24164"]);
+    env.git(&["rm", "-q", "docs/arxiv--2504.16054/meta.json"]);
+    env.write(".gitignore", "*\n");
+    env.git(&["commit", "-qam", "sneak"]);
+    env.git(&["checkout", "-q", "-"]);
+
+    let diff = env.ok(&["wiki", "diff", "wiki/arxiv--2410.24164"]);
+    assert!(diff.contains("+++ b/.gitignore"), "{diff}");
+    let out = env.run(&["wiki", "merge", "wiki/arxiv--2410.24164"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("outside pages/"), "{err}");
+    assert!(
+        env.vault()
+            .join("docs/arxiv--2504.16054/meta.json")
+            .is_file()
+    );
+    assert!(!env.vault().join("pages/pi0.md").exists());
+    assert_eq!(env.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn merged_pages_are_linted_again_against_the_vault_they_land_in() {
+    let env = Env::new();
+    assert!(
+        env.propose(PI0, &pi0_reply("Then pi0.5 [@arxiv:2504.16054]."))
+            .status
+            .success()
+    );
+    // The cited doc goes away on the vault's branch before the merge.
+    fs::remove_dir_all(env.vault().join("docs/arxiv--2504.16054")).unwrap();
+    let out = env.run(&["wiki", "merge", "wiki/arxiv--2410.24164"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("dead citation [@arxiv:2504.16054]"),
+        "{stdout}"
+    );
+    assert!(!env.vault().join("pages/pi0.md").exists());
+    assert!(env.ok(&["wiki", "ls"]).contains("wiki/arxiv--2410.24164"));
+}
+
+#[test]
+fn a_reindex_failure_after_the_merge_is_a_warning_and_the_log_block_stays() {
+    let env = Env::new();
+    let db = env.dir.join("cache/brain/index.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    fs::write(&db, "not a database").unwrap();
+    assert!(
+        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+            .status
+            .success()
+    );
+    let out = env.run(&["wiki", "merge", "wiki/arxiv--2410.24164"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.starts_with("warning: reindex: "), "{err}");
+    assert_eq!(env.queue(), [PI05]);
+}
+
+#[test]
+fn a_worktree_left_by_a_killed_propose_is_cleaned_up() {
+    let env = Env::new();
+    env.settle();
+    let leaked = env.dir.join("cache/brain/worktrees/wiki-1");
+    env.git(&["add", "-A"]);
+    env.git(&["commit", "-qm", "docs"]);
+    env.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        leaked.to_str().unwrap(),
+        "HEAD",
+    ]);
+    assert_eq!(env.git(&["worktree", "list"]).lines().count(), 2);
+    assert!(
+        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+            .status
+            .success()
+    );
+    assert_eq!(env.git(&["worktree", "list"]).lines().count(), 1);
+    assert!(!leaked.exists());
+}
+
+#[test]
+fn the_autosave_never_commits_an_open_merge() {
+    let env = Env::new();
+    env.settle();
+    let head = env.git(&["rev-parse", "HEAD"]);
+    fs::write(env.vault().join(".git/MERGE_HEAD"), head).unwrap();
+    let out = env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."));
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("a git merge is in progress"), "{err}");
+    assert_eq!(env.git(&["branch", "--list", "wiki/*"]), "");
+}
+
+#[test]
+fn a_conflicting_learn_proposal_is_kept_with_its_question() {
+    let env = Env::new();
+    env.write(
+        "pages/pi0.md",
+        &page("Pi0", PI0, "A VLA [@arxiv:2410.24164]."),
+    );
+    assert!(
+        env.propose(PI0, &pi0_reply("A flow VLA [@arxiv:2410.24164]."))
+            .status
+            .success()
+    );
+    let learn = format!(
+        "{}=== question: pi0\nWhat is pi0?\n",
+        pi0_reply("A VLA with an action expert [@arxiv:2410.24164].")
+    );
+    let out = env.propose("learn", &learn);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let branch = String::from_utf8(out.stdout).unwrap();
+    let branch = branch
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("branch: ")
+        .unwrap()
+        .to_owned();
+
+    env.ok(&["wiki", "merge", "wiki/arxiv--2410.24164"]);
+    let out = env.run(&["wiki", "merge", &branch]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "merged: none\npages: pi0\nconflict: pages/pi0.md\n"
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("it was kept"), "{err}");
+    assert!(env.ok(&["wiki", "ls"]).contains(&branch));
+    assert!(
+        env.git(&["log", "-1", "--format=%B", &branch])
+            .contains("Brain-Question: ")
+    );
+}
+
+#[test]
+fn only_a_wiki_merge_writes_a_compile_block() {
+    let env = Env::new();
+    let out = env.run(&["log", "--source", "compile", "x\ndocs: arxiv:2410.24164"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(env.queue(), [PI0, PI05]);
+}
+
+#[test]
+fn a_bad_or_huge_reply_says_how_to_fix_the_reply() {
+    let env = Env::new();
+    let out = env.propose(PI0, "no blocks here");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        err.starts_with("error: bad reply on stdin: no `=== page: <slug>` block\nnext: send `=== page: <slug>` blocks"),
+        "{err}"
+    );
+    let huge = format!("{REPLY}{}", "x".repeat(1 << 20));
+    let err = String::from_utf8(env.propose(PI0, &huge).stderr).unwrap();
+    assert!(
+        err.starts_with("error: bad reply on stdin: over 1048576 bytes"),
+        "{err}"
+    );
 }

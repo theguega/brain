@@ -640,8 +640,18 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
     })
 }
 
+/// The spans `brain get <id>#<span>` would accept for the doc once indexed, read from the
+/// vault alone: each chunk's heading, in order, so chunk `n` is the `n`th.
+pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
+    Ok(doc_source(vault, &id.dir())?
+        .chunks()
+        .into_iter()
+        .map(|c| c.heading)
+        .collect())
+}
+
 /// `[[target]]`, `[[target|label]]`, `[[target#span]]`, as targets, in order, once each.
-fn wikilinks(body: &str) -> Vec<String> {
+pub(crate) fn wikilinks(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = body;
     while let Some(i) = rest.find("[[") {

@@ -259,7 +259,14 @@ pub fn run_committer(root: &Path) -> Result<()> {
 }
 
 /// Commits everything pending, if anything is. The caller holds the vault lock.
+/// Refuses during a git merge someone left open: it would commit conflict markers.
 fn commit(root: &Path) -> Result<()> {
+    if root.join(".git/MERGE_HEAD").exists() {
+        return Err(Error::Usage(format!(
+            "a git merge is in progress in {}; finish it or run `git merge --abort` there",
+            root.display()
+        )));
+    }
     git(root, &["add", "-A"])?;
     if git(root, &["diff", "--cached", "--name-only"])?
         .trim()
