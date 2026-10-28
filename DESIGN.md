@@ -199,7 +199,7 @@ Karpathy's LLM Wiki pattern (gist 442a6bf5, 2026): instead of re-deriving answer
 
 **Contradictions.** When a new doc disagrees with a page, compile keeps both claims and adds a `> [!contradiction]` callout citing both. You resolve it by editing the page; open callouts are counted in the Sunday review.
 
-**Compile.** A like or `brain add` puts the doc in `brain wiki queue` (marked docs minus those listed in a `source: compile` log block). The tick starts one ordinary `reader` run per queued doc, at most 5 a night, with `planner/compile.md`. Each run:
+**Compile.** A like or `brain add` puts the doc in `brain wiki queue` (marked docs minus those listed on the `docs:` line of a `source: compile` log block, and minus those with an open `wiki/<doc>` branch, so dropping or conflicting a branch re-queues its doc). The tick starts one ordinary `reader` run per queued doc, at most 5 a night, with `planner/compile.md`. Each run:
 1. reads the doc and `brain pages`, and `brain find`s related pages
 2. replies with the full new text of each page it creates or changes, one `=== page: <slug>` block per page; it writes no file
 
@@ -220,7 +220,7 @@ A reader can't call drover, so the tick gathers its input first: the week's `cha
 
 Classifying by the wording of the correction fails, because one remark can be any of the three; Meta found the same. Incognito threads are never read.
 
-**Regression.** Each merged `learn` proposal carries its question, and the merge appends `{q, expect: [page-id], from: correction}` to `eval/questions.jsonl`. `brain eval` then fails any later retrieval change that loses the corrected answer. The check is a deterministic recall test, with no LLM judge.
+**Regression.** Each merged `learn` proposal carries its question: the reply adds a `=== question: <slug>` block after the page that answers it, and `propose` stores it as a `Brain-Question: {"q", "expect"}` trailer on the branch's commit. The merge appends `{q, expect: [page-id], from: correction}` to `eval/questions.jsonl`. `brain eval` then fails any later retrieval change that loses the corrected answer. The check is a deterministic recall test, with no LLM judge.
 
 **Lint.** `brain lint` adds deterministic wiki checks to the schema checks:
 - errors: dead `[[wikilinks]]` or citations, uncited paragraphs in concept or synthesis pages, cited ids missing from `sources[]`, a missing `summary`, a page over 1500 tokens (split it: a page should load whole, which is the progressive-disclosure lesson)
