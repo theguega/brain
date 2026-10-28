@@ -359,7 +359,7 @@ fn add_artifact_keeps_the_page_and_its_why() {
     let meta = env.meta("artifact--contracts-review");
     assert_eq!(meta["why"], "the contract table");
     assert_eq!(meta["source"], "page.html");
-    assert_eq!(meta["taint"], "own");
+    assert_eq!(meta["taint"], "external");
     assert!(meta["captured_at"].as_str().unwrap().ends_with(":00"));
     assert!(
         env.read("docs/artifact--contracts-review/index.html")

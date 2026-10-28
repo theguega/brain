@@ -162,7 +162,7 @@ fn c1_doc_types_match_their_schemas() {
         captured_at: AT.to_owned(),
     };
     let artifact = doc("artifact:contracts", Kind::ARTIFACT, artifact);
-    assert_eq!(artifact.taint, Taint::Own);
+    assert_eq!(artifact.taint, Taint::External);
     assert_valid("artifact", Kind::ARTIFACT.schema(), &artifact);
 
     let meeting = Meeting {
@@ -201,9 +201,26 @@ fn missing_required_fields_are_named() {
     let p = problems("paper", Kind::PAPER.schema(), &paper);
     assert!(p.contains(&Problem::Missing("date".to_owned())), "{p:?}");
     let book = doc("file:0a1b2c3d", Kind::parse("book").unwrap(), Fields::new());
+    assert_eq!(book.taint, Taint::External);
     let p = problems("book", Kind::parse("book").unwrap().schema(), &book);
     for f in ["title", "authors", "year", "links"] {
         assert!(p.contains(&Problem::Missing(f.to_owned())), "{f}: {p:?}");
+    }
+}
+
+#[test]
+fn only_notes_and_meetings_are_own() {
+    for (kind, id, taint) in [
+        ("note", "file:0a1b2c3d", Taint::Own),
+        ("meeting", "meeting:2026-10-27-weekly-sync", Taint::Own),
+        ("book", "file:0a1b2c3d", Taint::External),
+        ("course", "file:0a1b2c3d", Taint::External),
+        ("talk", "file:0a1b2c3d", Taint::External),
+        ("artifact", "artifact:contracts", Taint::External),
+        ("blog", "web:example-com-post", Taint::External),
+    ] {
+        let d = doc(id, Kind::parse(kind).unwrap(), Fields::new());
+        assert_eq!(d.taint, taint, "{kind}");
     }
 }
 
