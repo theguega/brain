@@ -4,7 +4,7 @@ brain is the knowledge layer: a vault of plain files, an index rebuilt from thos
 
 The repo is paperdb renamed (D2). It holds the Rust crate, `feed/` (Python, the paper and news feed), `planner/` (prompt files), and `contracts/` (JSON Schemas for C1–C16).
 
-Status: design, round 3. Requirements B1–B20, F1–F10, P1–P10.
+Status: design, round 3. Requirements B1–B21, F1–F10, P1–P10.
 
 ## Layers
 
@@ -59,8 +59,8 @@ Rules:
 
 ```text
 ~/brain/                      local git, no remote (Q15)
-  docs/<id>/meta.json         C1: kind, source, title, required metadata per kind
-  docs/<id>/text.md           full text (artifact: index.html; text extracted at index time)
+  docs/<id>/<id>.md           C1: frontmatter = kind, title, required metadata per kind; body = full text
+  docs/<id>/source.<ext>      a book's original file; an artifact's index.html (text extracted at index time)
   pages/<slug>.md             C2: the wiki: people, projects, decisions, concepts, syntheses
   log/YYYY-MM-DD.md           C3: journal, plan, shutdown, chat summaries
   chats/<id>.jsonl            raw chat transcripts (normalized C9 events)
@@ -76,6 +76,14 @@ Rules:
 - A write goes to a temp file and is then renamed (`write_atomic`, kept from paperdb), and is committed to local git in the background, debounced to one commit per minute.
 - Nothing in the vault holds an absolute path or a hostname (B16).
 
+## Obsidian-native
+
+The vault opens as an Obsidian vault, and its graph view is the brain's graph: the edges you see are the edges agents query.
+- **One note per doc.** `docs/<id>/<id>.md`, where `<id>` is the directory name, so `[[arxiv--2410.24164]]` resolves by file name. Its frontmatter holds the C1 metadata (shown in the properties panel), with `aliases` holding the title and short handles (`π0`), so `[[π0]]` also resolves.
+- **One link syntax.** A `[[wikilink]]` to a doc is a citation; a `[[wikilink]]` to a page is a cross-reference. A span is a heading: `[[arxiv--2410.24164#Method]]`, the same span `brain get` takes.
+- **Typed relations are frontmatter properties** whose values are wikilinks: `builds_on: ["[[arxiv--2504.16054]]"]`, `superseded_by`, `attendees`, `project`, or any name `brain link <a> <b> <rel>` writes. Obsidian draws them as graph edges; the index reads the property name as `rel`.
+- Frontmatter is YAML, parsed by one small crate shared by docs and pages; values that are wikilinks are quoted strings.
+
 ## Kinds
 
 Each kind is a JSON Schema in `contracts/kinds/<kind>.schema.json`. Adding a kind adds a file and needs no code change (C1). `brain lint` validates every doc against its schema.
@@ -90,7 +98,7 @@ Each kind is a JSON Schema in `contracts/kinds/<kind>.schema.json`. Adding a kin
 | artifact | title, why, source, captured_at | `brain add page.html --kind artifact --why` |
 | meeting | started_at, tz, place, attendees[] → pages, project? | you, by paste or file |
 
-**Lineage.** For papers, `add` also reads Papers with Code (`paperswithcode.co/api/v1/papers/<arxiv>/`) and stores its `predecessor_papers` and `successor_papers` as links with `rel: builds_on`, whether or not the other paper is in the library. Compile uses them to order a concept page's history (π0 → π0.5) instead of guessing it. PwC's code links, tasks and methods are not used: on π0 they are empty, too coarse, or wrong. If PwC is down, the paper just has no lineage yet, and the next `reindex` retries.
+**Lineage.** For papers, `add` also reads Papers with Code (`paperswithcode.co/api/v1/papers/<arxiv>/`) and stores its `predecessor_papers` and `successor_papers` as `builds_on` frontmatter properties, whether or not the other paper is in the library. Compile uses them to order a concept page's history (π0 → π0.5) instead of guessing it. PwC's code links, tasks and methods are not used: on π0 they are empty, too coarse, or wrong. If PwC is down, the paper just has no lineage yet, and the next `reindex` retries.
 
 Missing optional fields are fine. A missing required field is a `lint` error, and `add` reports it on the spot.
 
@@ -118,7 +126,7 @@ docs(id PK, kind, title, date, meta JSON, hash, taint)          -- taint: own | 
 chunks(id PK, doc, ord, heading, text)
 chunks_fts USING fts5(heading, text, tokenize='porter unicode61')
 vectors(chunk PK, dim, v BLOB)                                   -- f16, L2-normalized
-links(src, dst, rel)                                             -- from [[wikilinks]] and links{}
+links(src, dst, rel)                                             -- body [[wikilinks]] (rel: cites | mentions) and wikilink-valued frontmatter (rel: the property name)
 repos(name PK, path, remote, head, indexed_at)
 PRAGMA user_version                                              -- a mismatch means drop and reindex
 ```
@@ -197,7 +205,7 @@ Karpathy's LLM Wiki pattern (gist 442a6bf5, 2026): instead of re-deriving answer
 | concept | a method, idea or result across papers: "diffusion policy", "JEPA", "action chunking" | required |
 | synthesis | an answer worth keeping: a comparison, a chat answer, a reading of several docs | required |
 
-**Citations.** A claim cites its source inline as `[@<doc-id>]` or `[@<doc-id>#<span>]`, the same span syntax as `brain get`. In a concept or synthesis page, every paragraph and list item outside `## Open questions` carries at least one citation, and every cited id is in `sources[]`. This is the guard against drift: a summary of a summary is caught, because each claim must point back to a doc you can open.
+**Citations.** A claim cites its source inline as a wikilink to the doc, `[[<doc-id>]]` or `[[<doc-id>#<heading>]]`, so Obsidian draws the edge from the claim's page to its evidence. In a concept or synthesis page, every paragraph and list item outside `## Open questions` carries at least one citation, and every cited id is in `sources[]`. This is the guard against drift: a summary of a summary is caught, because each claim must point back to a doc you can open.
 
 **Contradictions.** When a new doc disagrees with a page, compile keeps both claims and adds a `> [!contradiction]` callout citing both. You resolve it by editing the page; open callouts are counted in the Sunday review.
 
@@ -296,11 +304,11 @@ A plan run is `drover run --headless --profile reader --prompt-file planner/plan
 
 ## Migration from paperdb (B10)
 
-1. `brain migrate-paperdb ~/papers` turns each `papers/<id>/paper.json` into `docs/<id>/meta.json` with `kind: paper`.
+1. `brain migrate-paperdb ~/papers` turns each `papers/<id>/paper.json` into the frontmatter of `docs/<id>/<id>.md` with `kind: paper`.
    - The card fields are kept under `meta.card` (still validated by the paper schema).
    - `links[]` is classified into `links{code, project, …}` by host.
    - `starred` becomes a tag.
-2. `paper.md` becomes `text.md`, and the PDFs are moved from `.cache/pdf`.
+2. `paper.md` becomes the body of that note, and the PDFs are copied to `~/.cache/brain/pdf/` (arXiv can re-fetch them).
 3. The drover journal (`journal.db`, 13 entries) becomes `log/` blocks with their original dates.
 4. `readings/` (9 files) becomes `docs` with `kind: book`, and text extraction is reused from paperdb's ingest chain.
 5. `inbox.jsonl` is folded into the feed pool, and its skips into `labels.jsonl`.
@@ -345,6 +353,7 @@ The whole system lives in `~/brain`, `~/.local/state`, `~/.config/brain` and the
 - Brute-force vectors in BLOBs, no sqlite-vec.
 - Files win: any disagreement between a file and the index is resolved by reindexing.
 - The feed is a persistent pool with cursors per source, never a daily rebuild.
+- The vault is Obsidian-native: one note per doc, citations and relations as wikilinks, so the graph view shows the same edges agents query.
 - The wiki follows Karpathy's LLM Wiki, with two additions: every claim cites a doc, and every agent edit is a branch you merge.
 
 ## Open (design level)
