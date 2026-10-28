@@ -14,7 +14,9 @@ use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{Error, Rel, Result, Slug, Vault, hal, lineage, lint, migrate, page, pwc, time, vault};
+use brain::{
+    Error, Rel, Result, Slug, Vault, hal, lineage, lint, migrate_paperdb, page, pwc, time, vault,
+};
 
 /// brain: the knowledge layer. A vault of plain files in a local git repo, and one CLI.
 ///
@@ -430,16 +432,16 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             journal,
             readings,
         } => {
-            let src = migrate::Sources {
+            let src = migrate_paperdb::Sources {
                 papers,
                 journal: journal.as_deref(),
                 readings: readings.as_deref(),
             };
-            let net = migrate::Lookups {
+            let net = migrate_paperdb::Lookups {
                 pwc: &pwc::paper,
                 hal: &hal::record,
             };
-            let r = migrate::run(vault, &src, &time::now()?, net);
+            let r = migrate_paperdb::run(vault, &src, &time::now()?, net);
             for w in &r.warnings {
                 eprintln!("warning: {w}");
             }

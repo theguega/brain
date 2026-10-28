@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use brain::error::Error;
 use brain::hal;
 use brain::id::ArxivId;
-use brain::migrate::{self, Lookups, Report, Sources};
+use brain::migrate_paperdb::{self, Lookups, Report, Sources};
 use brain::pwc::{self, Related};
 use brain::time::Now;
 use brain::{Result, Vault, lineage};
@@ -370,7 +370,7 @@ fn migrates_papers_journal_readings_and_skips() {
     let dir = tmp();
     let fx = fixture(&dir);
     let v = vault(&dir);
-    let r = migrate::run(&v, &fx.sources(), &now(), NET);
+    let r = migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(
         (
             r.papers, r.blogs, r.pdfs, r.lineage, r.journal, r.books, r.skips, r.existing
@@ -566,10 +566,10 @@ fn a_second_run_changes_nothing_and_new_rows_still_land() {
     let dir = tmp();
     let fx = fixture(&dir);
     let v = vault(&dir);
-    let first = migrate::run(&v, &fx.sources(), &now(), NET);
+    let first = migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     let before = snapshot(v.root());
     let sources = snapshot(&dir.join("papers"));
-    let second = migrate::run(&v, &fx.sources(), &now(), NET);
+    let second = migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(snapshot(v.root()), before);
     assert_eq!(snapshot(&dir.join("papers")), sources);
     assert_eq!(
@@ -595,11 +595,14 @@ fn a_second_run_changes_nothing_and_new_rows_still_land() {
             ("2026-10-18", "drover", "theo/axi-core", "what: Third pass."),
         ],
     );
-    let third = migrate::run(&v, &fx.sources(), &now(), NET);
+    let third = migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(third.journal, 2, "an identical row is a block of its own");
     let log = v.read(Path::new("log/2026-10-18.md")).unwrap().unwrap();
     assert_eq!(log.matches("what: Third pass.").count(), 2);
-    assert_eq!(migrate::run(&v, &fx.sources(), &now(), NET).journal, 0);
+    assert_eq!(
+        migrate_paperdb::run(&v, &fx.sources(), &now(), NET).journal,
+        0
+    );
 }
 
 #[test]
@@ -607,7 +610,7 @@ fn a_changed_source_is_reported_not_applied() {
     let dir = tmp();
     let fx = fixture(&dir);
     let v = vault(&dir);
-    migrate::run(&v, &fx.sources(), &now(), NET);
+    migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     let before = snapshot(v.root());
     write(
         &fx.papers.join("papers/2410.24164/paper.md"),
@@ -623,7 +626,7 @@ fn a_changed_source_is_reported_not_applied() {
         &fx.readings.join("course.html"),
         "<html><head><title>Edited</title></head></html>",
     );
-    let r = migrate::run(&v, &fx.sources(), &now(), NET);
+    let r = migrate_paperdb::run(&v, &fx.sources(), &now(), NET);
     assert_eq!(snapshot(v.root()), before);
     assert!(
         warned(
@@ -653,7 +656,7 @@ fn hal_without_a_record_stays_a_blog() {
         journal: None,
         readings: None,
     };
-    let r = migrate::run(
+    let r = migrate_paperdb::run(
         &v,
         &src,
         &now(),
@@ -684,7 +687,7 @@ fn lineage_waits_for_papers_with_code_then_reindex_fills_it() {
         pwc: &pwc_down,
         hal: &hal_stub,
     };
-    let r = migrate::run(&v, &src, &now(), down);
+    let r = migrate_paperdb::run(&v, &src, &now(), down);
     assert_eq!((r.papers, r.lineage), (3, 0));
     assert!(warned(&r, "reindex will retry"));
     assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());
@@ -778,7 +781,7 @@ fn one_pwc_failure_costs_only_that_paper() {
         pwc: &pwc_flaky,
         hal: &hal_stub,
     };
-    let r = migrate::run(&v, &src, &now(), net);
+    let r = migrate_paperdb::run(&v, &src, &now(), net);
     assert_eq!(r.lineage, 1);
     assert!(warned(&r, "arxiv:2410.24164: papers with code"));
     assert!(meta(&v, "docs/arxiv--2410.24164").get("lineage").is_none());

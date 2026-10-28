@@ -18,7 +18,7 @@ pub mod label;
 pub mod lineage;
 pub mod lint;
 pub mod log;
-pub mod migrate;
+pub mod migrate_paperdb;
 mod net;
 pub mod page;
 pub mod pwc;
