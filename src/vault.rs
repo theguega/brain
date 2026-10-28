@@ -153,6 +153,15 @@ impl Vault {
             .map(drop)
     }
 
+    /// Runs `f` under the vault lock once every pending write is committed, so a git
+    /// operation on the vault (a wiki proposal or merge) never races the autosave: the
+    /// pending committer later finds nothing to commit.
+    pub(crate) fn settled<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _lock = lock(&self.root)?;
+        commit(&self.root)?;
+        f()
+    }
+
     /// Commits this process's writes within the delay, without a daemon.
     ///
     /// If no committer is pending (the marker is not locked), this starts `brain` again as

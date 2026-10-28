@@ -211,7 +211,7 @@ fn lint_names_a_missing_required_field_and_exits_1() {
         "vault/docs/arxiv--2410.24164/meta.json",
         &PI0.replace("  \"authors\": [\"Kevin Black\"],\n", ""),
     );
-    env.write("vault/pages/jepa.md", "---\nkind: concept\ntitle: JEPA\nstatus: active\nsources: []\nupdated: 2026-10-27\n---\nbody\n");
+    env.write("vault/pages/jepa.md", "---\nkind: concept\ntitle: JEPA\nstatus: active\nsources: []\nupdated: 2026-10-27\n---\n# JEPA\n");
     let out = env.run(&["lint"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
@@ -219,7 +219,7 @@ fn lint_names_a_missing_required_field_and_exits_1() {
         "errors[2/2]{file,error}:\n  docs/arxiv--2410.24164/meta.json,missing required authors\n  pages/jepa.md,missing required summary\n"
     );
     let err = String::from_utf8(out.stderr).unwrap();
-    assert!(err.starts_with("error: 2 schema errors\nnext: "), "{err}");
+    assert!(err.starts_with("error: 2 lint errors\nnext: "), "{err}");
     let json = env.run(&["lint", "--json"]);
     assert_eq!(
         String::from_utf8(json.stdout)

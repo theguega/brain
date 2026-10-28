@@ -13,7 +13,7 @@ use crate::chunk::{self, Chunk};
 use crate::doc::Taint;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
-use crate::id::DocId;
+use crate::id::{DocId, Slug};
 use crate::log::Entry;
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
@@ -279,6 +279,40 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     counts.unembedded = missing_vectors(&ix, &embedder.model)?;
     counts.repos = count("SELECT count(*) FROM repos")?;
     Ok(counts)
+}
+
+/// Re-reads these pages alone (the ones a merge changed), then fills missing vectors.
+/// Without a built index there is nothing to update: the next reindex builds it.
+pub fn reindex_pages(
+    vault: &Vault,
+    path: &Path,
+    slugs: &[Slug],
+    embedder: &Embedder,
+) -> Result<Vec<String>> {
+    let mut ix = match Index::open_existing(path) {
+        Ok(ix) => ix,
+        Err(Error::NoIndex) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut warnings = Vec::new();
+    let tx = ix.conn.transaction()?;
+    for slug in slugs {
+        if vault.path(&page::path(slug)).is_file() {
+            match page_source(vault, slug.as_str()) {
+                Ok(s) => {
+                    upsert(&tx, &s)?;
+                }
+                Err(e) => warnings.push(format!("pages/{slug}.md: {e}")),
+            }
+        } else {
+            delete(&tx, slug.as_str())?;
+        }
+    }
+    tx.commit()?;
+    if let (_, Some(e)) = embed_missing(&mut ix, embedder) {
+        warnings.push(format!("embedder: {e}"));
+    }
+    Ok(warnings)
 }
 
 /// `true` when the doc was new or changed.
