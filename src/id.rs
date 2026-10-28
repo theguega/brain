@@ -128,16 +128,8 @@ impl DocId {
     /// `web:` id for a [`canonical_url`]: host (without `www.`), path and query, slugified.
     /// A slug too long to keep whole ends in `-<sha256[:6]>` of the canonical URL.
     #[must_use]
-    pub fn web_canonical(canonical: &str, sha256_hex: &str) -> Option<Self> {
+    pub fn web(canonical: &str, sha256_hex: &str) -> Option<Self> {
         Slug::slugify_or_hash(host_path(canonical), sha256_hex).map(Self::Web)
-    }
-
-    /// The `web:` id of the older rule that dropped the whole query. Docs added under it
-    /// keep it, and `add` still finds them by it.
-    #[must_use]
-    pub fn web(url: &str) -> Option<Self> {
-        let rest = host_path(url);
-        Slug::slugify(rest.split(['?', '#']).next().unwrap_or(rest)).map(Self::Web)
     }
 
     #[must_use]
@@ -156,12 +148,6 @@ impl DocId {
     #[must_use]
     pub fn artifact(title: &str, sha256_hex: &str) -> Option<Self> {
         Slug::slugify_or_hash(title, sha256_hex).map(Self::Artifact)
-    }
-
-    /// The `artifact:` id of the rule that cut long titles without a hash.
-    #[must_use]
-    pub fn artifact_legacy(title: &str) -> Option<Self> {
-        Slug::slugify(title).map(Self::Artifact)
     }
 
     /// The id with `-<sha256[:6]>` appended, for a source whose id another doc holds.
@@ -273,7 +259,7 @@ pub fn canonical_url(url: &str) -> String {
 }
 
 /// A URL without its scheme and `www.`.
-fn host_path(url: &str) -> &str {
+pub(crate) fn host_path(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     rest.strip_prefix("www.").unwrap_or(rest)
 }
@@ -407,12 +393,8 @@ mod tests {
         let canon =
             canonical_url("https://www.example.com/blog/Post_1?utm_source=x&p=2&ref=hn#top");
         assert_eq!(canon, "https://example.com/blog/Post_1?p=2");
-        let web = DocId::web_canonical(&canon, sha).unwrap();
+        let web = DocId::web(&canon, sha).unwrap();
         assert_eq!(web.to_string(), "web:example-com-blog-post-1-p-2");
-        assert_eq!(
-            DocId::web("https://www.example.com/blog/Post_1?p=2").unwrap(),
-            DocId::parse("web:example-com-blog-post-1").unwrap()
-        );
         assert_eq!(
             canonical_url("https://x.com/a?utm_x=1&fbclid=2"),
             "https://x.com/a"
@@ -424,7 +406,7 @@ mod tests {
         );
 
         let long = format!("https://example.com/{}", "a-".repeat(100));
-        let id = DocId::web_canonical(&long, sha).unwrap();
+        let id = DocId::web(&long, sha).unwrap();
         assert_eq!(id.rest().len(), 64);
         assert!(id.rest().ends_with("-abcdef"), "{id}");
         assert_eq!(DocId::parse(&id.to_string()).unwrap(), id);

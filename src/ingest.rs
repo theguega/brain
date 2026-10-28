@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::contract::{Kind, Problem, Schema};
 use crate::doc::{Artifact, Doc, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
 use crate::error::{Error, Result, io};
-use crate::id::{ArxivId, DocId, canonical_url};
+use crate::id::{ArxivId, DocId, Slug, canonical_url, host_path};
 use crate::time::{self, Now};
 use crate::vault::{Vault, read_json};
 use crate::{alphaxiv, arxiv, hub, lineage, net, page, pwc};
@@ -52,17 +52,23 @@ pub struct Added {
 /// The id `add` would give an id or URL, without fetching anything.
 pub fn resolve(vault: &Vault, input: &str) -> Result<DocId> {
     match web_url(input) {
-        Some(url) => match web_slot(vault, url)? {
-            Slot::Held(id) | Slot::Free(id) => Ok(id),
-        },
+        Some(url) => web_slot(vault, url).map(Slot::id),
         None => DocId::parse(input),
     }
 }
 
 /// Where a source lands: the doc that already holds it, or the free id it gets.
-enum Slot {
+pub(crate) enum Slot {
     Held(DocId),
     Free(DocId),
+}
+
+impl Slot {
+    pub(crate) fn id(self) -> DocId {
+        match self {
+            Self::Held(id) | Self::Free(id) => id,
+        }
+    }
 }
 
 /// `id` unless another source holds it, then `hashed`. `legacy` is the id an older rule
@@ -90,19 +96,36 @@ fn slot(
     }
 }
 
-/// A web URL's slot: the same URL means the same [`canonical_url`] in `meta.json`.
-fn web_slot(vault: &Vault, url: &str) -> Result<Slot> {
+/// A web URL's slot: the same URL means the same [`canonical_url`] as the doc's `source`,
+/// which a web page that became a paper keeps too.
+pub(crate) fn web_slot(vault: &Vault, url: &str) -> Result<Slot> {
     let canon = canonical_url(url);
     let sha = sha256_bytes(canon.as_bytes())?;
-    let id = DocId::web_canonical(&canon, &sha).ok_or_else(|| Error::BadRef(url.to_owned()))?;
+    let id = DocId::web(&canon, &sha).ok_or_else(|| Error::BadRef(url.to_owned()))?;
     let same = |id: &DocId| {
         let meta: Value = read_json(&vault.path(&Vault::doc_dir(id).join("meta.json")))?;
         Ok(meta
-            .get("url")
+            .get("source")
             .and_then(Value::as_str)
             .is_some_and(|u| canonical_url(u) == canon))
     };
-    slot(vault, DocId::web(url), id.clone(), id.hashed(&sha), same)
+    // The older rule dropped the whole query.
+    let rest = host_path(url);
+    let legacy = Slug::slugify(rest.split(['?', '#']).next().unwrap_or(rest)).map(DocId::Web);
+    slot(vault, legacy, id.clone(), id.hashed(&sha), same)
+}
+
+/// An artifact's slot: the same source means the same `file` text in the doc.
+pub(crate) fn artifact_slot(vault: &Vault, title: &str, file: &str, text: &str) -> Result<Slot> {
+    let sha = sha256_bytes(text.as_bytes())?;
+    let id = DocId::artifact(title, &sha).ok_or_else(|| Error::BadRef(title.to_owned()))?;
+    let same = |id: &DocId| {
+        let held = vault.read(&Vault::doc_dir(id).join(file))?;
+        Ok(held.as_deref() == Some(text))
+    };
+    // The older rule cut long titles without a hash.
+    let legacy = Slug::slugify(title).map(DocId::Artifact);
+    slot(vault, legacy, id.clone(), id.hashed(&sha), same)
 }
 
 /// `Some` for an http(s) URL that does not name an arXiv paper.
@@ -349,19 +372,10 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
     };
 
     let id = match kind {
-        Kind::ARTIFACT => {
-            let sha = sha256_bytes(&bytes)?;
-            let id = DocId::artifact(&title, &sha).ok_or_else(|| Error::BadRef(name.clone()))?;
-            let same = |id: &DocId| {
-                let held = vault.read(&Vault::doc_dir(id).join(text_file))?;
-                Ok(held.as_deref() == Some(text.as_str()))
-            };
-            let hashed = id.hashed(&sha);
-            match slot(vault, DocId::artifact_legacy(&title), id, hashed, same)? {
-                Slot::Held(id) => return existing(vault, id),
-                Slot::Free(id) => Some(id),
-            }
-        }
+        Kind::ARTIFACT => match artifact_slot(vault, &title, text_file, &text)? {
+            Slot::Held(id) => return existing(vault, id),
+            Slot::Free(id) => Some(id),
+        },
         Kind::MEETING => {
             let started = fields
                 .get("started_at")
@@ -617,7 +631,7 @@ mod tests {
         let put = |id: &DocId, url: &str| {
             let meta = Vault::doc_dir(id).join("meta.json");
             vault
-                .write_json(&meta, &serde_json::json!({"url": url}))
+                .write_json(&meta, &serde_json::json!({"source": url}))
                 .unwrap();
         };
         let land = |url: &str| match web_slot(&vault, url).unwrap() {
