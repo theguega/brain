@@ -808,9 +808,9 @@ fn a_full_catch_up_makes_find_whole_again() {
 }
 
 #[test]
-fn the_skill_body_fits_its_600_token_budget() {
+fn the_skill_body_fits_its_1500_token_budget() {
     let skill =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("skill/SKILL.md")).unwrap();
     let body = skill.splitn(3, "---").nth(2).unwrap();
-    assert!(tokens(body) <= 600, "{} tokens", tokens(body));
+    assert!(tokens(body) <= 1500, "{} tokens", tokens(body));
 }

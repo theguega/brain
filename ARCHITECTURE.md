@@ -15,7 +15,7 @@ Settled in design rounds 1–3 (2026-10-18/19). Requirements are in `REQUIREMENT
 3. **Query live, don't mirror.** Tasks and calendars are read from their source when needed. The brain stores pointers and decisions.
 4. **Only what you mark.** Nothing enters the brain unless you mark it. A skip is stored only as a label (id, verdict, ts).
 5. **Stores don't think.** Stores call no model. Deterministic jobs fetch and score. Judgment is made by an agent that runs on a timer.
-6. **Token budget is a spec.** At most 400 tokens load with every session. A skill body is at most 600 tokens, there are at most 8 skills, and long output is capped behind `--full`.
+6. **Token budget is a spec.** At most 400 tokens load with every session. A skill body is at most 600 tokens (brain's own skill: 1,500, since agents otherwise pay for several `--help` calls per task), there are at most 8 skills, and long output is capped behind `--full`.
 7. **Readers can't act.** The agent that reads untrusted text has no shell. Actions go through drover, with a prompt you have approved.
 8. **Nothing runs without your approval.** An actor run starts only when you start it or approve it (`autostart = "never"`).
 9. **Evidence before code.** Claims tables, open loops, rerankers and code summaries all wait until `brain eval` or real use shows they're needed.
