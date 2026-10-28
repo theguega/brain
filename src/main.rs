@@ -282,7 +282,7 @@ fn add_one(lib: &Library, r: &str, a: &Args, tags: &[Tag]) -> Result<(PaperId, b
     paper.links.extend(a.all("--link").iter().cloned());
     lib.save(&paper)?;
     let via = match ingest::fetch_text(lib, &paper, Route::Auto) {
-        Ok(via) => format!("text via {via:?}").to_lowercase(),
+        Ok(via) => format!("text via {via}"),
         Err(e) => format!("NO TEXT ({e})"),
     };
     out!("added {id}  {}  [{via}]", paper.label());
@@ -386,7 +386,7 @@ fn show(lib: &Library, a: &Args) -> Result<()> {
     }
     if a.output() == Output::Json {
         let mut v = serde_json::to_value(&p).map_err(|source| Error::Decode {
-            what: "paper".into(),
+            what: "paper",
             source,
         })?;
         if let Some(o) = v.as_object_mut() {
@@ -509,7 +509,7 @@ fn card(lib: &Library, a: &Args) -> Result<()> {
             let id = lib.find(r)?;
             let mut p = lib.load(&id)?;
             let c: Card = serde_json::from_str(&stdin()?).map_err(|source| Error::Decode {
-                what: "card on stdin (see `paperdb card schema`)".into(),
+                what: "card on stdin (see `paperdb card schema`)",
                 source,
             })?;
             p.card = Some(c);
@@ -543,7 +543,7 @@ fn text(lib: &Library, a: &Args) -> Result<()> {
             } else {
                 Route::Auto
             };
-            format!("{:?}", ingest::fetch_text(lib, &p, route)?).to_lowercase()
+            ingest::fetch_text(lib, &p, route)?.to_string()
         }
         _ => return Err(usage("text <id> [--pdf | -]")),
     };
@@ -672,7 +672,7 @@ fn print_candidates(cs: &[&discover::Candidate]) {
 
 fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(v).map_err(|source| Error::Decode {
-        what: "output".into(),
+        what: "output",
         source,
     })?;
     out!("{s}");

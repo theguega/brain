@@ -1,7 +1,8 @@
 //! HTTP via the system `curl`: present on every macOS/Linux box, and it saves us a
 //! TLS stack's worth of dependencies for a handful of GETs.
 
-use std::io::Write;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -80,8 +81,8 @@ fn ok(url: &str, r: Response) -> Result<Vec<u8>> {
 }
 
 fn curl(url: &str, method: Method<'_>) -> Result<Response> {
-    let fail = |detail: String| Error::Command {
-        cmd: format!("curl {url}"),
+    let fail = |detail: String| Error::Network {
+        url: url.to_owned(),
         detail,
     };
     let mut cmd = Command::new("curl");
@@ -96,19 +97,19 @@ fn curl(url: &str, method: Method<'_>) -> Result<Response> {
         "-w",
         "%{stderr}%{http_code}",
     ]);
-    if let Method::PostJson(_) = method {
-        cmd.args([
-            "-X",
-            "POST",
-            "-H",
-            "content-type: application/json",
-            "--data-binary",
-            "@-",
-        ]);
-    }
     let stdin = match method {
         Method::Get => Stdio::null(),
-        Method::PostJson(_) => Stdio::piped(),
+        Method::PostJson(_) => {
+            cmd.args([
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                "@-",
+            ]);
+            Stdio::piped()
+        }
     };
     let mut child = cmd
         .arg(url)
@@ -145,7 +146,8 @@ pub(crate) fn encode(s: &str) -> String {
         if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
             out.push(char::from(b));
         } else {
-            out.push_str(&format!("%{b:02X}"));
+            // Writing to a String cannot fail.
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out

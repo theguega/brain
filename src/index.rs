@@ -1,6 +1,7 @@
 //! `.cache/index.db`: a disposable SQLite view of the library.
 //! Rebuilt whenever the files change, so it never needs to be synced or migrated.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::UNIX_EPOCH;
@@ -35,6 +36,7 @@ CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT);
 /// Column weights for ranking, in `fts` column order (id, name, title, abstract, keywords, note, body).
 const BM25: &str = "bm25(fts, 0, 10, 8, 4, 4, 4, 1)";
 
+#[derive(Debug)]
 pub struct Index {
     conn: Connection,
 }
@@ -51,6 +53,7 @@ pub struct Hit {
     pub snippet: String,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct Query<'a> {
     /// Free text; empty for filter-only.
     pub text: &'a str,
@@ -113,19 +116,21 @@ impl Index {
             "snippet(fts, -1, '[', ']', '…', 16) FROM fts JOIN papers p ON p.id = fts.id \
              WHERE fts MATCH :q"
         });
+        // Writing to a String cannot fail.
         if let Some(f) = q.filter {
-            sql.push_str(&format!(" AND ({f})"));
+            let _ = write!(sql, " AND ({f})");
         }
         let tag_params: Vec<String> = (0..q.tags.len()).map(|i| format!(":t{i}")).collect();
         for t in &tag_params {
-            sql.push_str(&format!(
+            let _ = write!(
+                sql,
                 " AND EXISTS (SELECT 1 FROM json_each(p.tags) WHERE value = {t})"
-            ));
+            );
         }
         if fts.is_empty() {
             sql.push_str(" ORDER BY p.published DESC");
         } else {
-            sql.push_str(&format!(" ORDER BY {BM25}"));
+            let _ = write!(sql, " ORDER BY {BM25}");
         }
         sql.push_str(" LIMIT :limit");
 

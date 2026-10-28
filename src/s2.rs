@@ -54,7 +54,7 @@ pub fn recommend(
     let url = format!("{API}?fields=title,publicationDate,externalIds&limit={limit}");
     let raw = net::post_json_ok(&url, &body)?;
     let r: Response = serde_json::from_slice(&raw).map_err(|source| Error::Decode {
-        what: "semantic scholar".to_owned(),
+        what: "semantic scholar",
         source,
     })?;
     Ok(r.papers
