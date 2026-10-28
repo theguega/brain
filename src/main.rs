@@ -163,8 +163,8 @@ enum Reply {
         name: &'static str,
         cols: &'static [&'static str],
         rows: Vec<Vec<Value>>,
-        /// Rows before the cap.
-        total: usize,
+        /// Rows before the cap; `N+` when even that count was capped.
+        total: String,
     },
     Text(String),
     /// Fields, then a text block (`text` in JSON).
@@ -269,13 +269,10 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
                 name: "results",
                 cols: &["id", "kind", "date", "title", "snippet"],
                 rows,
-                total: found.total,
+                total: found.total.to_string(),
             };
-            if found.degraded {
-                Reply::Many(vec![
-                    Reply::Fields(vec![("degraded", json!("no vectors"))]),
-                    table,
-                ])
+            if let Some(why) = found.degraded {
+                Reply::Many(vec![Reply::Fields(vec![("degraded", json!(why))]), table])
             } else {
                 table
             }
@@ -315,7 +312,7 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
                 name: "hits",
                 cols: &["repo", "path", "line", "text"],
                 rows,
-                total,
+                total: total.to_string(),
             }
         }
         Cmd::Pages { kind } => {
@@ -333,7 +330,7 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
             Reply::Table {
                 name: "pages",
                 cols: &["slug", "kind", "updated", "summary"],
-                total: rows.len(),
+                total: rows.len().to_string(),
                 rows,
             }
         }
@@ -474,7 +471,7 @@ fn run_lint(vault: &Vault) -> Result<(Reply, ExitCode)> {
         Reply::Table {
             name: "errors",
             cols: &["file", "error"],
-            total: rows.len(),
+            total: rows.len().to_string(),
             rows,
         },
         code,

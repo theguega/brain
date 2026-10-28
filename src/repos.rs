@@ -12,9 +12,11 @@
 //! they repeat their main checkout.
 
 use std::fs;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -27,8 +29,13 @@ pub const FILE: &str = "repos.toml";
 const DEFAULT_ROOT: &str = "~/Developer";
 /// Directories below a root searched for checkouts.
 const DEPTH: usize = 3;
-/// Commits read on a repo's first index.
-const FIRST_COMMITS: usize = 500;
+/// The commits indexed per repo: the last ones reachable from HEAD, so an incremental
+/// reindex and a full one agree, and rebased-away commits leave.
+const COMMITS: usize = 500;
+/// Markdown files bigger than this are skipped: they are generated, not written.
+const MAX_DOC_BYTES: u64 = 1 << 20;
+/// Chars kept of a commit message.
+const MAX_MESSAGE: usize = 16_000;
 const MAX_HITS: usize = 20;
 const MAX_LINE: usize = 160;
 
@@ -225,14 +232,16 @@ pub(crate) struct Scan {
     pub head: String,
     pub remote: Option<String>,
     pub docs: Vec<Source>,
-    /// Commits after the last indexed head, or the last [`FIRST_COMMITS`].
-    pub commits: Vec<Source>,
+    /// The last [`COMMITS`], or `None` when HEAD is the last indexed head.
+    pub commits: Option<Vec<Source>>,
+    /// Markdown files over [`MAX_DOC_BYTES`].
+    pub skipped: Vec<String>,
     pub languages: Vec<String>,
     pub last_activity: String,
 }
 
 /// `None` for a checkout with no commit yet.
-pub(crate) fn scan(repo: &Repo, since: Option<&str>) -> Result<Option<Scan>> {
+pub(crate) fn scan(repo: &Repo, last_head: Option<&str>) -> Result<Option<Scan>> {
     let Ok(head) = git(&repo.path, &["rev-parse", "HEAD"]) else {
         return Ok(None);
     };
@@ -246,8 +255,13 @@ pub(crate) fn scan(repo: &Repo, since: Option<&str>) -> Result<Option<Scan>> {
     let files = git(&repo.path, &["ls-files", "-z"])?;
     let files: Vec<&str> = files.split('\0').filter(|f| !f.is_empty()).collect();
     let mut docs = Vec::new();
+    let mut skipped = Vec::new();
     for f in files.iter().filter(|f| is_doc(f)) {
         let p = repo.path.join(f);
+        if fs::metadata(&p).is_ok_and(|m| m.len() > MAX_DOC_BYTES) {
+            skipped.push((*f).to_owned());
+            continue;
+        }
         let Ok(text) = fs::read_to_string(&p) else {
             continue;
         };
@@ -266,15 +280,17 @@ pub(crate) fn scan(repo: &Repo, since: Option<&str>) -> Result<Option<Scan>> {
             links: Vec::new(),
         });
     }
-    let range = since
-        .filter(|s| git(&repo.path, &["cat-file", "-e", &format!("{s}^{{commit}}")]).is_ok())
-        .map(|s| format!("{s}..HEAD"));
-    let commits = commits(repo, range.as_deref())?;
+    let commits = if last_head == Some(head.as_str()) {
+        None
+    } else {
+        Some(commits(repo)?)
+    };
     Ok(Some(Scan {
         head,
         remote,
         docs,
         commits,
+        skipped,
         languages: languages(&files),
         last_activity,
     }))
@@ -285,13 +301,13 @@ fn is_doc(f: &str) -> bool {
         || (f.starts_with("docs/") && f.ends_with(".md"))
 }
 
-fn commits(repo: &Repo, range: Option<&str>) -> Result<Vec<Source>> {
-    let first = format!("--max-count={FIRST_COMMITS}");
+fn commits(repo: &Repo) -> Result<Vec<Source>> {
     let args = [
         "log",
         "--no-merges",
         "--format=%H%x1f%cs%x1f%B%x1e",
-        range.unwrap_or(&first),
+        &format!("--max-count={COMMITS}"),
+        "HEAD",
     ];
     let out = git(&repo.path, &args)?;
     Ok(out
@@ -299,6 +315,7 @@ fn commits(repo: &Repo, range: Option<&str>) -> Result<Vec<Source>> {
         .filter_map(|rec| {
             let mut f = rec.trim_start_matches('\n').splitn(3, '\x1f');
             let (sha, date, msg) = (f.next()?, f.next()?, f.next()?.trim());
+            let msg: String = msg.chars().take(MAX_MESSAGE).collect();
             let short = sha.get(..12)?;
             Some(Source {
                 id: format!("commit:{}@{short}", repo.name),
@@ -307,7 +324,7 @@ fn commits(repo: &Repo, range: Option<&str>) -> Result<Vec<Source>> {
                 date: date.to_owned(),
                 meta: json!({"repo": repo.name, "sha": sha}),
                 taint: Taint::Own,
-                text: msg.to_owned(),
+                text: msg,
                 links: Vec::new(),
             })
         })
@@ -406,90 +423,212 @@ pub struct Hit {
     pub text: String,
 }
 
-/// `rg --json` across the repos; the first [`MAX_HITS`] in repo, path, line order, and
-/// the total number of matching lines.
-pub fn code(repos: &[Repo], pattern: &str) -> Result<(Vec<Hit>, usize)> {
+/// Matches counted before rg is stopped, and the time it gets: a pattern that hits
+/// everything must not cost memory or minutes.
+const MATCH_CAP: usize = 10_000;
+const DEADLINE: Duration = Duration::from_secs(10);
+/// Bytes read of one rg JSON line; a longer one still counts as a match.
+const MAX_JSON_LINE: usize = 64 * 1024;
+/// Bytes of rg's stderr kept for the error.
+const MAX_STDERR: usize = 2000;
+
+/// How many lines matched: all of them, or as many as were counted before the cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Total {
+    Exact(usize),
+    AtLeast(usize),
+}
+
+impl std::fmt::Display for Total {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exact(n) => write!(f, "{n}"),
+            Self::AtLeast(n) => write!(f, "{n}+"),
+        }
+    }
+}
+
+enum Stop {
+    Finished,
+    Early,
+}
+
+/// `rg --json` across the repos: the first [`MAX_HITS`] (see [`spread`]) and the total.
+/// Only the hits that can be printed are kept; rg is killed past [`MATCH_CAP`] or [`DEADLINE`].
+pub fn code(repos: &[Repo], pattern: &str) -> Result<(Vec<Hit>, Total)> {
     if repos.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), Total::Exact(0)));
     }
     let fail = |detail: String| Error::Command {
         cmd: "rg".to_owned(),
         detail,
     };
     let mut child = Command::new("rg")
-        .args([
-            "--json",
-            "--smart-case",
-            "--max-columns",
-            "500",
-            "-e",
-            pattern,
-            "--",
-        ])
+        .args(["--json", "--smart-case", "-e", pattern, "--"])
         .args(repos.iter().map(|r| &r.path))
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| fail(e.to_string()))?;
-    let mut hits = Vec::new();
-    if let Some(out) = child.stdout.take() {
-        for line in BufReader::new(out).lines() {
-            let line = line.map_err(|e| fail(e.to_string()))?;
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if v.get("type").and_then(Value::as_str) != Some("match") {
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let stderr = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        if let Some(mut err) = err {
+            // Drained to the end, so rg never blocks on a full pipe.
+            let _ = (&mut err).take(MAX_STDERR as u64).read_to_end(&mut kept);
+            let _ = std::io::copy(&mut err, &mut std::io::sink());
+        }
+        String::from_utf8_lossy(&kept).trim().to_owned()
+    });
+    let (tx, rx) = mpsc::channel();
+    let watchdog = std::thread::spawn(move || {
+        let killed = match rx.recv_timeout(DEADLINE) {
+            Ok(Stop::Finished) => false,
+            Ok(Stop::Early) | Err(_) => child.kill().is_ok(),
+        };
+        (child.wait(), killed)
+    });
+
+    let mut kept: Vec<Vec<Hit>> = vec![Vec::new(); repos.len()];
+    let mut count = 0;
+    let read = (|| -> std::io::Result<bool> {
+        let Some(out) = out else { return Ok(false) };
+        let mut reader = BufReader::new(out);
+        let mut line = Vec::new();
+        while read_line_capped(&mut reader, &mut line, MAX_JSON_LINE)? {
+            if !line.starts_with(br#"{"type":"match""#) {
                 continue;
             }
-            let data = v.get("data").unwrap_or(&Value::Null);
-            let text_of = |k: &str| {
-                data.get(k)
-                    .and_then(|p| p.get("text"))
-                    .and_then(Value::as_str)
-            };
-            let (Some(path), Some(text)) = (text_of("path"), text_of("lines")) else {
-                continue;
-            };
-            let Some(repo) = repos.iter().find(|r| Path::new(path).starts_with(&r.path)) else {
-                continue;
-            };
-            let rel = Path::new(path)
-                .strip_prefix(&repo.path)
-                .map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned());
-            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            hits.push(Hit {
-                repo: repo.name.clone(),
-                path: rel,
-                line: data.get("line_number").and_then(Value::as_u64).unwrap_or(0),
-                text: text.chars().take(MAX_LINE).collect(),
-            });
+            count += 1;
+            if let Some((i, hit)) = parse_hit(&line, repos)
+                && let Some(k) = kept.get_mut(i)
+            {
+                let at = k.partition_point(|h| (&h.path, h.line) <= (&hit.path, hit.line));
+                if at < MAX_HITS {
+                    k.insert(at, hit);
+                    k.truncate(MAX_HITS);
+                }
+            }
+            if count >= MATCH_CAP {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })();
+    let capped = matches!(read, Ok(true));
+    let _ = tx.send(if capped { Stop::Early } else { Stop::Finished });
+    let (status, killed) = watchdog
+        .join()
+        .map_err(|_| fail("the watchdog thread died".to_owned()))?;
+    let stderr = stderr.join().unwrap_or_default();
+    read.map_err(|e| fail(e.to_string()))?;
+    let status = status.map_err(|e| fail(e.to_string()))?;
+    if !killed {
+        // 0 and 1 are matches and no match; 2 with matches is a partial error (an unreadable file).
+        match status.code() {
+            Some(0 | 1) => {}
+            Some(2) if count > 0 => {}
+            Some(2) => return Err(Error::Usage(format!("rg: {stderr}"))),
+            _ => return Err(fail(format!("{status}: {stderr}"))),
         }
     }
-    // Exit 1 is "no match"; 2 is an error such as a bad regex.
-    let status = child.wait().map_err(|e| fail(e.to_string()))?;
-    if status.code() == Some(2) && hits.is_empty() {
-        return Err(Error::Usage(format!("rg rejected the pattern {pattern:?}")));
-    }
-    let total = hits.len();
-    Ok((spread(hits), total))
+    let total = if killed || capped {
+        Total::AtLeast(count)
+    } else {
+        Total::Exact(count)
+    };
+    Ok((spread(kept), total))
 }
 
-/// The first [`MAX_HITS`], taken round-robin across repos so one busy repo cannot hide
-/// the others, then in repo, path, line order.
-fn spread(mut hits: Vec<Hit>) -> Vec<Hit> {
-    hits.sort_by(|a, b| (&a.repo, &a.path, a.line).cmp(&(&b.repo, &b.path, b.line)));
-    let mut by_repo: Vec<std::collections::VecDeque<Hit>> = Vec::new();
-    for h in hits {
-        match by_repo.last_mut() {
-            Some(q) if q.front().is_some_and(|f| f.repo == h.repo) => q.push_back(h),
-            _ => by_repo.push(std::collections::VecDeque::from([h])),
+/// One line into `buf`, without its newline, keeping at most `max` bytes of it.
+/// `false` at the end of input.
+fn read_line_capped(r: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -> std::io::Result<bool> {
+    buf.clear();
+    let mut any = false;
+    loop {
+        let chunk = r.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(any);
+        }
+        any = true;
+        let (line, used, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (chunk.get(..i).unwrap_or_default(), i + 1, true),
+            None => (chunk, chunk.len(), false),
+        };
+        let room = max.saturating_sub(buf.len());
+        buf.extend_from_slice(line.get(..room.min(line.len())).unwrap_or_default());
+        r.consume(used);
+        if done {
+            return Ok(true);
         }
     }
+}
+
+/// The repo index and hit of one `match` message.
+fn parse_hit(line: &[u8], repos: &[Repo]) -> Option<(usize, Hit)> {
+    let v: Value = serde_json::from_slice(line).ok()?;
+    let data = v.get("data")?;
+    let path = text_or_bytes(data.get("path")?)?;
+    let text = text_or_bytes(data.get("lines")?)?;
+    let i = repos
+        .iter()
+        .position(|r| Path::new(&path).starts_with(&r.path))?;
+    let repo = repos.get(i)?;
+    let rel = Path::new(&path)
+        .strip_prefix(&repo.path)
+        .map_or_else(|_| path.clone(), |p| p.to_string_lossy().into_owned());
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some((
+        i,
+        Hit {
+            repo: repo.name.clone(),
+            path: rel,
+            line: data.get("line_number").and_then(Value::as_u64).unwrap_or(0),
+            text: text.chars().take(MAX_LINE).collect(),
+        },
+    ))
+}
+
+/// rg's `{"text": ..}`, or `{"bytes": base64}` for data that is not UTF-8.
+fn text_or_bytes(v: &Value) -> Option<String> {
+    if let Some(t) = v.get("text").and_then(Value::as_str) {
+        return Some(t.to_owned());
+    }
+    let raw = base64(v.get("bytes")?.as_str()?)?;
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+fn base64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let (mut acc, mut bits) = (0_u32, 0);
+    for c in s.bytes().filter(|c| *c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// At most [`MAX_HITS`], taken round-robin across repos (each already in path, line
+/// order) so one busy repo cannot hide the others, then in repo, path, line order.
+fn spread(mut by_repo: Vec<Vec<Hit>>) -> Vec<Hit> {
+    by_repo.iter_mut().for_each(|k| k.reverse());
     let mut out = Vec::new();
-    while out.len() < MAX_HITS && by_repo.iter().any(|q| !q.is_empty()) {
-        for q in &mut by_repo {
+    while out.len() < MAX_HITS && by_repo.iter().any(|k| !k.is_empty()) {
+        for k in &mut by_repo {
             if out.len() < MAX_HITS
-                && let Some(h) = q.pop_front()
+                && let Some(h) = k.pop()
             {
                 out.push(h);
             }
@@ -527,6 +666,24 @@ mod tests {
         assert_eq!(Config::parse("roots = [\"/abs\"]").unwrap_err().0, 1);
         assert_eq!(Config::parse("x = []").unwrap_err().0, 1);
         assert_eq!(Config::parse("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn base64_decodes_rg_bytes() {
+        assert_eq!(base64("Y2Fm6SB4eXoK").unwrap(), b"caf\xe9 xyz\n");
+        assert_eq!(base64("YQ==").unwrap(), b"a");
+    }
+
+    #[test]
+    fn long_lines_are_cut_not_held() {
+        let input = format!("{}\nshort\n", "x".repeat(100));
+        let mut r = BufReader::with_capacity(8, input.as_bytes());
+        let mut buf = Vec::new();
+        assert!(read_line_capped(&mut r, &mut buf, 10).unwrap());
+        assert_eq!(buf, b"xxxxxxxxxx");
+        assert!(read_line_capped(&mut r, &mut buf, 10).unwrap());
+        assert_eq!(buf, b"short");
+        assert!(!read_line_capped(&mut r, &mut buf, 10).unwrap());
     }
 
     #[test]

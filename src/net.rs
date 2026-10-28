@@ -16,6 +16,10 @@ const UA: &str = concat!(
     " (personal paper library)"
 );
 const ATTEMPTS: u32 = 4;
+/// Seconds for a whole request, unless the caller sets its own.
+const MAX_TIME: u64 = 120;
+/// Seconds to connect: a dead host fails fast whatever the request's budget.
+const CONNECT_TIME: &str = "10";
 
 pub(crate) struct Response {
     pub status: u16,
@@ -38,14 +42,14 @@ pub(crate) enum Method<'a> {
 pub(crate) fn request(url: &str, method: Method<'_>) -> Result<Response> {
     let mut wait = Duration::from_secs(3);
     for _ in 1..ATTEMPTS {
-        let r = curl(url, method)?;
+        let r = curl(url, method, MAX_TIME)?;
         if r.status != 429 && r.status < 500 {
             return Ok(r);
         }
         sleep(wait);
         wait *= 2;
     }
-    curl(url, method)
+    curl(url, method, MAX_TIME)
 }
 
 pub(crate) fn get(url: &str) -> Result<Response> {
@@ -59,6 +63,11 @@ pub(crate) fn get_ok(url: &str) -> Result<Vec<u8>> {
 
 pub(crate) fn post_json_ok(url: &str, body: &str) -> Result<Vec<u8>> {
     ok(url, request(url, Method::PostJson(body))?)
+}
+
+/// One POST, no retry, given up after `secs`: for a caller that has a fallback.
+pub(crate) fn post_json_within(url: &str, body: &str, secs: u64) -> Result<Vec<u8>> {
+    ok(url, curl(url, Method::PostJson(body), secs)?)
 }
 
 pub(crate) fn download(url: &str, to: &Path) -> Result<()> {
@@ -80,7 +89,7 @@ fn ok(url: &str, r: Response) -> Result<Vec<u8>> {
     }
 }
 
-fn curl(url: &str, method: Method<'_>) -> Result<Response> {
+fn curl(url: &str, method: Method<'_>, max_time: u64) -> Result<Response> {
     let fail = |detail: String| Error::Network {
         url: url.to_owned(),
         detail,
@@ -90,8 +99,10 @@ fn curl(url: &str, method: Method<'_>) -> Result<Response> {
     cmd.args([
         "-sS",
         "-L",
+        "--connect-timeout",
+        CONNECT_TIME,
         "--max-time",
-        "120",
+        &max_time.to_string(),
         "-A",
         UA,
         "-w",

@@ -22,6 +22,7 @@ const DIM: usize = 16;
 struct FakeEmbedder {
     url: String,
     texts: Arc<AtomicUsize>,
+    max_batch: Arc<AtomicUsize>,
 }
 
 impl FakeEmbedder {
@@ -30,6 +31,8 @@ impl FakeEmbedder {
         let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
         let texts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&texts);
+        let max_batch = Arc::new(AtomicUsize::new(0));
+        let batch = Arc::clone(&max_batch);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
@@ -54,10 +57,17 @@ impl FakeEmbedder {
                 let req: Value = serde_json::from_slice(&body).unwrap();
                 let inputs = req.get("input").and_then(Value::as_array).unwrap();
                 counter.fetch_add(inputs.len(), Ordering::SeqCst);
+                batch.fetch_max(inputs.len(), Ordering::SeqCst);
+                // Another model, another dimension.
+                let dim = if req.get("model").and_then(Value::as_str) == Some("small") {
+                    DIM / 2
+                } else {
+                    DIM
+                };
                 let data: Vec<Value> = inputs
                     .iter()
                     .enumerate()
-                    .map(|(i, t)| json!({"index": i, "embedding": bag(t.as_str().unwrap())}))
+                    .map(|(i, t)| json!({"index": i, "embedding": bag(t.as_str().unwrap(), dim)}))
                     .collect();
                 let resp = json!({"data": data}).to_string();
                 let _ = write!(
@@ -67,7 +77,11 @@ impl FakeEmbedder {
                 );
             }
         });
-        Self { url, texts }
+        Self {
+            url,
+            texts,
+            max_batch,
+        }
     }
 
     fn texts(&self) -> usize {
@@ -76,8 +90,8 @@ impl FakeEmbedder {
 }
 
 /// Words hashed into buckets: the same text always gets the same vector.
-fn bag(text: &str) -> Vec<f32> {
-    let mut v = vec![0.0_f32; DIM];
+fn bag(text: &str, dim: usize) -> Vec<f32> {
+    let mut v = vec![0.0_f32; dim];
     for w in text
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -88,11 +102,24 @@ fn bag(text: &str) -> Vec<f32> {
             .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
                 (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
             });
-        if let Some(x) = v.get_mut(usize::try_from(h % DIM as u64).unwrap()) {
+        if let Some(x) = v.get_mut(usize::try_from(h % dim as u64).unwrap()) {
             *x += 1.0;
         }
     }
     v
+}
+
+/// A server that accepts connections and never answers.
+fn hanging() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in listener.incoming() {
+            held.push(s);
+        }
+    });
+    url
 }
 
 /// A URL nothing listens on.
@@ -141,6 +168,10 @@ impl Env {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_with(&[], args)
+    }
+
+    fn run_with(&self, envs: &[(&str, &str)], args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_brain"))
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -152,9 +183,20 @@ impl Env {
             .env("BRAIN_EMBED_URL", &self.embed_url)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(envs.iter().copied())
             .args(args)
             .output()
             .unwrap()
+    }
+
+    fn ok_with(&self, envs: &[(&str, &str)], args: &[&str]) -> String {
+        let out = self.run_with(envs, args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -551,4 +593,283 @@ fn code_greps_the_registered_repos_live() {
     );
     env.write("repos.toml", "roots = [\"/abs\"]\n");
     assert_eq!(env.run(&["code", "x"]).status.code(), Some(1));
+}
+
+/// `(shown, total)` from a `name[shown/total]{...}:` header.
+fn header(out: &str) -> (String, String) {
+    let line = out
+        .lines()
+        .find(|l| l.contains('[') && l.ends_with(':'))
+        .unwrap();
+    let inner = line.split_once('[').unwrap().1.split_once(']').unwrap().0;
+    let (n, t) = inner.split_once('/').unwrap();
+    (n.to_owned(), t.to_owned())
+}
+
+/// A fake `rg` first on PATH.
+fn fake_rg(env: &Env, script: &str) -> String {
+    let bin = env.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let rg = bin.join("rg");
+    fs::write(&rg, format!("#!/bin/sh\n{script}\n")).unwrap();
+    Command::new("chmod").arg("+x").arg(&rg).status().unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+#[test]
+fn code_counts_past_the_cap_without_holding_the_matches() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    let lines: String = (0..20_000).map(|i| format!("needle {i}\n")).collect();
+    fs::write(env.dir.join("Developer/demo/big.txt"), lines).unwrap();
+    let out = env.ok(&["code", "needle"]);
+    assert_eq!(
+        header(&out),
+        ("20".to_owned(), "10000+".to_owned()),
+        "{out}"
+    );
+}
+
+#[test]
+fn code_stops_rg_at_the_deadline() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    let repo = env.dir.join("Developer/demo");
+    let path = fake_rg(
+        &env,
+        &format!(
+            "echo '{{\"type\":\"match\",\"data\":{{\"path\":{{\"text\":\"{}/x\"}},\"lines\":{{\"text\":\"hit\"}},\"line_number\":1}}}}'\nexec sleep 60",
+            repo.display()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let out = env.ok_with(&[("PATH", &path)], &["code", "hit"]);
+    assert!(started.elapsed().as_secs() < 15, "{:?}", started.elapsed());
+    assert_eq!(out, "hits[1/1+]{repo,path,line,text}:\n  demo,x,1,hit\n");
+}
+
+#[test]
+fn code_reads_non_utf8_lines_and_reports_a_broken_rg() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    fs::write(
+        env.dir.join("Developer/demo/latin1.txt"),
+        b"caf\xe9 cell_controller\n",
+    )
+    .unwrap();
+    let out = env.ok(&["code", "cell_controller"]);
+    assert!(
+        out.contains("demo,latin1.txt,1,caf\u{fffd} cell_controller"),
+        "{out}"
+    );
+
+    let path = fake_rg(&env, "echo boom >&2\nexit 3");
+    let out = env.run_with(&[("PATH", &path)], &["code", "x"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("boom"));
+}
+
+#[test]
+fn a_hanging_embedder_degrades_find_within_seconds() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    env.ok(&["reindex"]);
+    let url = hanging();
+    let started = std::time::Instant::now();
+    let out = env.ok_with(&[("BRAIN_EMBED_URL", &url)], &["find", "laundry"]);
+    assert!(started.elapsed().as_secs() < 9, "{:?}", started.elapsed());
+    assert!(out.starts_with("degraded: no vectors\n"), "{out}");
+
+    env.write(
+        "docs/file--0badc0de/text.md",
+        "# Teleop latency notes\n\nChanged.\n",
+    );
+    let started = std::time::Instant::now();
+    let out = env.run_with(
+        &[("BRAIN_EMBED_URL", &url), ("BRAIN_EMBED_TIMEOUT", "1")],
+        &["reindex"],
+    );
+    assert!(started.elapsed().as_secs() < 9, "{:?}", started.elapsed());
+    assert!(out.status.success());
+    assert_eq!(
+        Env::count(&String::from_utf8(out.stdout).unwrap(), "unembedded"),
+        1
+    );
+}
+
+#[test]
+fn vectors_of_another_model_count_as_missing() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    let chunks = Env::count(&env.ok(&["reindex"]), "chunks");
+    let small = [("BRAIN_EMBED_MODEL", "small")];
+    assert!(
+        env.ok_with(&small, &["find", "laundry"])
+            .starts_with("degraded: no vectors\n")
+    );
+    let counts = env.ok_with(&small, &["reindex"]);
+    assert_eq!(Env::count(&counts, "changed"), 0, "{counts}");
+    assert_eq!(Env::count(&counts, "embedded"), chunks, "{counts}");
+    assert_eq!(Env::count(&counts, "unembedded"), 0, "{counts}");
+    assert!(
+        !env.ok_with(&small, &["find", "laundry"])
+            .contains("degraded")
+    );
+    // Back on the first model, with the embedder down for one changed doc: find says so.
+    let back = env.ok(&["reindex"]);
+    assert_eq!(Env::count(&back, "embedded"), chunks, "{back}");
+    env.write(
+        "docs/file--0badc0de/text.md",
+        "# Teleop latency notes\n\nChanged.\n",
+    );
+    env.ok_with(&[("BRAIN_EMBED_URL", &closed_port())], &["reindex"]);
+    assert!(
+        env.ok(&["find", "laundry"])
+            .starts_with("degraded: partial vectors\n")
+    );
+}
+
+#[test]
+fn incremental_and_full_reindex_keep_the_same_commits() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    let repo = env.dir.join("Developer/many");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    let mut stream = String::new();
+    for i in 1..=505 {
+        let msg = format!("commit number {i}");
+        stream.push_str(&format!(
+            "commit refs/heads/main\ncommitter t <t@t> {} +0000\ndata {}\n{msg}\n",
+            1_700_000_000 + i,
+            msg.len()
+        ));
+    }
+    let mut child = Command::new("git")
+        .current_dir(&repo)
+        .args(["fast-import", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    git(&repo, &["reset", "-q", "--hard"]);
+
+    let commits = |env: &Env| env.ok(&["find", "commit", "--repo", "many", "--kind", "log"]);
+    env.ok(&["reindex"]);
+    assert_eq!(header(&commits(&env)).1, "500");
+    // One commit rebased away, two new ones.
+    git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "commit number 506"],
+    );
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "commit number 507"],
+    );
+    env.ok(&["reindex"]);
+    let incremental = commits(&env);
+    assert_eq!(header(&incremental).1, "500");
+    let gone = env.hits(&[
+        "commit", "number", "505", "--repo", "many", "--limit", "500",
+    ]);
+    assert!(gone.iter().all(|h| h["title"] != "commit number 505"));
+    assert!(gone.iter().any(|h| h["title"] == "commit number 507"));
+    env.ok(&["reindex", "--full"]);
+    assert_eq!(commits(&env), incremental);
+}
+
+#[test]
+fn find_total_counts_the_docs_the_words_match() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    for i in 0..30 {
+        env.write(
+            &format!("docs/file--{i:08x}/meta.json"),
+            &json!({"id": format!("file:{i:08x}"), "kind": "note", "taint": "own", "added": "2026-10-21T09:00:00+02:00", "title": format!("Note {i}")}).to_string(),
+        );
+        let body = if i < 25 {
+            "A robot arm."
+        } else {
+            "Something else."
+        };
+        env.write(&format!("docs/file--{i:08x}/text.md"), body);
+    }
+    env.ok(&["reindex"]);
+    assert_eq!(
+        header(&env.ok(&["find", "robot"])),
+        ("8".to_owned(), "25".to_owned())
+    );
+    let (n, total) = header(&env.ok(&["find", "zzzznomatch"]));
+    assert_eq!(n, total);
+}
+
+#[test]
+fn fence_markers_in_external_text_stay_inside_the_budget() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    env.write(
+        "docs/web--example-com-x/meta.json",
+        &json!({"id": "web:example-com-x", "kind": "blog", "taint": "external", "added": "2026-10-21T09:00:00+02:00",
+                "title": "Fences", "url": "https://example.com/x", "site": "example.com",
+                "abstract": "a>>>b<<<c ".repeat(150)}).to_string(),
+    );
+    env.ok(&["reindex"]);
+    let hit = env.hits(&["a", "b", "c"]);
+    let snippet = hit.first().unwrap()["snippet"].as_str().unwrap().to_owned();
+    assert!(
+        snippet.chars().count() <= 160,
+        "{} {snippet}",
+        snippet.chars().count()
+    );
+    assert_eq!(snippet.matches(">>>").count(), 1, "{snippet}");
+    let got: Value =
+        serde_json::from_str(&env.ok(&["--json", "get", "web:example-com-x"])).unwrap();
+    let text = got["text"].as_str().unwrap();
+    assert!(text.chars().count() <= 1000, "{}", text.chars().count());
+    assert_eq!(text.matches(">>>").count(), 1);
+}
+
+#[test]
+fn embedding_goes_in_batches_and_huge_repo_docs_are_skipped() {
+    let embedder = FakeEmbedder::start();
+    let env = Env::new(&embedder.url);
+    fixture(&env);
+    for i in 0..100 {
+        env.write(&format!("log/2026-09-{:02}.md", i % 28 + 1), "");
+    }
+    for i in 0..100 {
+        env.write(
+            &format!("docs/file--{i:08x}/meta.json"),
+            &json!({"id": format!("file:{i:08x}"), "kind": "note", "taint": "own", "added": "2026-10-21T09:00:00+02:00", "title": format!("Note {i}")}).to_string(),
+        );
+    }
+    let repo = env.dir.join("Developer/demo");
+    fs::write(repo.join("AGENTS.md"), "x ".repeat(1 << 20)).unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "Add a huge AGENTS.md"]);
+    let out = env.run(&["reindex"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("repo demo: AGENTS.md is too big to index")
+    );
+    let counts = String::from_utf8(out.stdout).unwrap();
+    assert!(Env::count(&counts, "embedded") > 100, "{counts}");
+    assert_eq!(embedder.max_batch.load(Ordering::SeqCst), 32);
+    assert_eq!(
+        env.run(&["get", "repo:demo/AGENTS.md"]).status.code(),
+        Some(1)
+    );
 }

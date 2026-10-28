@@ -344,10 +344,11 @@ fn link(s: &str) -> Option<(usize, &str)> {
     Some((open + 1 + close + 2 + end + 1, inner.get(..close)?))
 }
 
-/// At most `max` chars of [`plain`] text, starting a little before the first query term.
+/// At most `max` chars of `plain` (the output of [`plain`]), starting a little before
+/// the first query term.
 #[must_use]
-pub(crate) fn snippet(text: &str, terms: &[String], max: usize) -> String {
-    let chars: Vec<char> = plain(text).chars().collect();
+pub(crate) fn snippet(plain: &str, terms: &[String], max: usize) -> String {
+    let chars: Vec<char> = plain.chars().collect();
     let lower: String = chars
         .iter()
         .flat_map(|c| c.to_lowercase().take(1))

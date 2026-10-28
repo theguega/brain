@@ -1,7 +1,9 @@
 //! Vectors (B12): a local OpenAI-compatible `/v1/embeddings` server, stored as f16.
 //!
 //! `BRAIN_EMBED_URL` (default [`DEFAULT_URL`]) and `BRAIN_EMBED_MODEL` (default
-//! [`DEFAULT_MODEL`]) pick the server and model.
+//! [`DEFAULT_MODEL`]) pick the server and model; `BRAIN_EMBED_TIMEOUT` is the seconds a
+//! reindex batch may take (default [`BATCH_SECS`]). A query gets [`QUERY_SECS`], then
+//! `find` goes on without vectors.
 
 use serde::Deserialize;
 use serde_json::json;
@@ -13,6 +15,8 @@ pub const DEFAULT_URL: &str = "http://localhost:11434/v1/embeddings";
 pub const DEFAULT_MODEL: &str = "qwen3-embedding:0.6b";
 /// Texts per request.
 pub(crate) const BATCH: usize = 32;
+pub const BATCH_SECS: u64 = 60;
+pub const QUERY_SECS: u64 = 5;
 /// Chars sent per text: a whole table can be long, and the server truncates anyway.
 const MAX_CHARS: usize = 8000;
 /// Qwen3-Embedding is trained with an instruction on the query side only.
@@ -23,6 +27,7 @@ const QUERY_PREFIX: &str =
 pub struct Embedder {
     pub url: String,
     pub model: String,
+    pub batch_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -48,17 +53,22 @@ impl Embedder {
         Self {
             url: var("BRAIN_EMBED_URL", DEFAULT_URL),
             model: var("BRAIN_EMBED_MODEL", DEFAULT_MODEL),
+            batch_secs: var("BRAIN_EMBED_TIMEOUT", "").parse().unwrap_or(BATCH_SECS),
         }
     }
 
-    /// One L2-normalized vector per text, in order.
+    /// One L2-normalized vector per text, in order, within a batch's time.
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        self.embed_within(texts, self.batch_secs)
+    }
+
+    fn embed_within(&self, texts: &[String], secs: u64) -> Result<Vec<Vec<f32>>> {
         let input: Vec<String> = texts
             .iter()
             .map(|t| t.chars().take(MAX_CHARS).collect())
             .collect();
         let body = json!({"model": self.model, "input": input}).to_string();
-        let raw = net::post_json_ok(&self.url, &body)?;
+        let raw = net::post_json_within(&self.url, &body, secs)?;
         let mut r: Response = serde_json::from_slice(&raw).map_err(|source| Error::Decode {
             what: "the embedder",
             source,
@@ -77,7 +87,7 @@ impl Embedder {
     }
 
     pub fn embed_query(&self, q: &str) -> Result<Vec<f32>> {
-        let mut v = self.embed(&[format!("{QUERY_PREFIX}{q}")])?;
+        let mut v = self.embed_within(&[format!("{QUERY_PREFIX}{q}")], QUERY_SECS)?;
         Ok(v.pop().unwrap_or_default())
     }
 }

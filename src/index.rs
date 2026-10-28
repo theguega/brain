@@ -20,7 +20,7 @@ use crate::vault::Vault;
 use crate::{contract::Kind, page};
 
 /// Bumped on any change to the tables or to chunking: a mismatch drops the index.
-pub const SCHEMA: i32 = 1;
+pub const SCHEMA: i32 = 2;
 
 const DDL: &str = "
 CREATE TABLE docs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
@@ -29,7 +29,8 @@ CREATE TABLE chunks (id INTEGER PRIMARY KEY, doc TEXT NOT NULL, ord INTEGER NOT 
     heading TEXT NOT NULL, text TEXT NOT NULL);
 CREATE INDEX chunks_doc ON chunks (doc, ord);
 CREATE VIRTUAL TABLE chunks_fts USING fts5 (heading, text, tokenize = 'porter unicode61');
-CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, dim INTEGER NOT NULL, v BLOB NOT NULL);
+CREATE TABLE vectors (chunk INTEGER PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL,
+    v BLOB NOT NULL);
 CREATE TABLE links (src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL);
 CREATE INDEX links_src ON links (src);
 CREATE TABLE repos (name TEXT PRIMARY KEY, path TEXT NOT NULL, remote TEXT,
@@ -172,16 +173,18 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     }
     let mut ix = Index::open(path)?;
     let mut counts = Counts::default();
-    let sources = vault_sources(vault, &mut counts.warnings)?;
     let repos = repos::discover(&repos::Config::load(vault.root())?)?;
     let now = crate::time::now()?.at;
 
     let tx = ix.conn.transaction()?;
     let mut seen = BTreeSet::new();
-    for s in &sources {
-        counts.changed += usize::from(upsert(&tx, s)?);
-        seen.insert(s.id.clone());
-    }
+    let mut changed = 0;
+    vault_sources(vault, &mut counts.warnings, |s| {
+        changed += usize::from(upsert(&tx, &s)?);
+        seen.insert(s.id);
+        Ok(())
+    })?;
+    counts.changed = changed;
     let mut scanned: Vec<(&Repo, Scan)> = Vec::new();
     for repo in &repos {
         let last: Option<String> = tx
@@ -191,7 +194,7 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
                 |r| r.get(0),
             )
             .optional()?;
-        let scan = match repos::scan(repo, last.as_deref()) {
+        let mut scan = match repos::scan(repo, last.as_deref()) {
             Ok(Some(scan)) => scan,
             Ok(None) => continue,
             Err(e) => {
@@ -199,7 +202,26 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
                 continue;
             }
         };
-        for s in scan.docs.iter().chain(&scan.commits) {
+        counts.warnings.extend(
+            scan.skipped
+                .iter()
+                .map(|f| format!("repo {}: {f} is too big to index", repo.name)),
+        );
+        let commits = match scan.commits.take() {
+            Some(c) => c,
+            // HEAD has not moved: the commits indexed for it are still the set.
+            None => {
+                let mut stmt = tx.prepare("SELECT id FROM docs WHERE id LIKE ?1")?;
+                let ids = stmt
+                    .query_map([format!("commit:{}@%", repo.name)], |r| {
+                        r.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                seen.extend(ids);
+                Vec::new()
+            }
+        };
+        for s in std::mem::take(&mut scan.docs).iter().chain(&commits) {
             counts.changed += usize::from(upsert(&tx, s)?);
             seen.insert(s.id.clone());
         }
@@ -217,21 +239,11 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
 
     let names: BTreeSet<&str> = scanned.iter().map(|(r, _)| r.name.as_str()).collect();
     let stale: Vec<String> = {
-        let mut stmt = tx.prepare("SELECT id, json_extract(meta, '$.repo') FROM docs")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?;
-        let mut stale = Vec::new();
-        for row in rows {
-            let (id, repo) = row?;
-            // Commits are read once, since the last head, so they count as seen while their repo is.
-            let kept_commit =
-                id.starts_with("commit:") && repo.as_deref().is_some_and(|r| names.contains(r));
-            if !seen.contains(&id) && !kept_commit {
-                stale.push(id);
-            }
-        }
-        stale
+        let mut stmt = tx.prepare("SELECT id FROM docs")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter().filter(|id| !seen.contains(id)).collect()
     };
     for id in &stale {
         delete(&tx, id)?;
@@ -264,8 +276,7 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     };
     counts.docs = count("SELECT count(*) FROM docs")?;
     counts.chunks = count("SELECT count(*) FROM chunks")?;
-    counts.unembedded =
-        count("SELECT count(*) FROM chunks WHERE id NOT IN (SELECT chunk FROM vectors)")?;
+    counts.unembedded = missing_vectors(&ix, &embedder.model)?;
     counts.repos = count("SELECT count(*) FROM repos")?;
     Ok(counts)
 }
@@ -357,35 +368,54 @@ fn linked_from(tx: &Transaction<'_>, repo: &Repo, remote: Option<&str>) -> Resul
     Ok(out.into_iter().collect())
 }
 
-/// Fills every chunk that has no vector. Stops at the first embedder failure, keeping
-/// what it did: the vectors so far, and the error.
+/// Chunks without a vector from `model`: vectors from another model count as missing.
+pub(crate) fn missing_vectors(ix: &Index, model: &str) -> Result<usize> {
+    let n: i64 = ix.conn.query_row(
+        "SELECT count(*) FROM chunks WHERE id NOT IN (SELECT chunk FROM vectors WHERE model = ?1)",
+        [model],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n).unwrap_or(0))
+}
+
+/// Fills every chunk that has no vector from the embedder's model, one batch in memory
+/// at a time. Stops at the first embedder failure, keeping the vectors so far.
 fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) {
-    let todo: Result<Vec<(i64, String)>> = (|| {
-        let mut stmt = ix.conn.prepare(
-            "SELECT c.id, f.heading, f.text FROM chunks c JOIN chunks_fts f ON f.rowid = c.id
-             WHERE c.id NOT IN (SELECT chunk FROM vectors) ORDER BY c.id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                format!("{}\n{}", r.get::<_, String>(1)?, r.get::<_, String>(2)?),
-            ))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    })();
-    let todo = match todo {
-        Ok(t) => t,
-        Err(e) => return (0, Some(e)),
-    };
     let mut done = 0;
-    for batch in todo.chunks(embed::BATCH) {
+    let mut after = 0_i64;
+    loop {
+        let batch: Result<Vec<(i64, String)>> = (|| {
+            let mut stmt = ix.conn.prepare(
+                "SELECT c.id, f.heading, f.text FROM chunks c JOIN chunks_fts f ON f.rowid = c.id
+                 WHERE c.id > ?1 AND c.id NOT IN (SELECT chunk FROM vectors WHERE model = ?2)
+                 ORDER BY c.id LIMIT ?3",
+            )?;
+            let limit = i64::try_from(embed::BATCH).unwrap_or(1);
+            let rows = stmt.query_map(params![after, embedder.model, limit], |r| {
+                Ok((
+                    r.get(0)?,
+                    format!("{}\n{}", r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                ))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })();
+        let batch = match batch {
+            Ok(b) if b.is_empty() => return (done, None),
+            Ok(b) => b,
+            Err(e) => return (done, Some(e)),
+        };
         let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
         let stored = embedder.embed(&texts).and_then(|vs| {
             let tx = ix.conn.transaction()?;
             for ((id, _), v) in batch.iter().zip(&vs) {
                 tx.execute(
-                    "INSERT OR REPLACE INTO vectors VALUES (?1, ?2, ?3)",
-                    params![id, i64::try_from(v.len()).unwrap_or(0), embed::to_blob(v)],
+                    "INSERT OR REPLACE INTO vectors VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        id,
+                        embedder.model,
+                        i64::try_from(v.len()).unwrap_or(0),
+                        embed::to_blob(v)
+                    ],
                 )?;
             }
             tx.commit()?;
@@ -395,17 +425,20 @@ fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) 
             Ok(()) => done += batch.len(),
             Err(e) => return (done, Some(e)),
         }
+        after = batch.last().map_or(after, |(id, _)| *id);
     }
-    (done, None)
 }
 
-/// Docs, pages and log blocks, sorted by id. Unreadable files are warnings, not failures:
-/// `brain lint` is where they get fixed.
-fn vault_sources(vault: &Vault, warnings: &mut Vec<String>) -> Result<Vec<Source>> {
-    let mut out = Vec::new();
+/// Docs, pages and log blocks, one at a time into `f`, so the vault is never held in
+/// memory. Unreadable files are warnings, not failures: `brain lint` is where they get fixed.
+fn vault_sources(
+    vault: &Vault,
+    warnings: &mut Vec<String>,
+    mut f: impl FnMut(Source) -> Result<()>,
+) -> Result<()> {
     for name in entries(vault, "docs")? {
         match doc_source(vault, &name) {
-            Ok(s) => out.push(s),
+            Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("docs/{name}: {e}")),
         }
     }
@@ -414,7 +447,7 @@ fn vault_sources(vault: &Vault, warnings: &mut Vec<String>) -> Result<Vec<Source
             continue;
         };
         match page_source(vault, slug) {
-            Ok(s) => out.push(s),
+            Ok(s) => f(s)?,
             Err(e) => warnings.push(format!("pages/{name}: {e}")),
         }
     }
@@ -423,12 +456,12 @@ fn vault_sources(vault: &Vault, warnings: &mut Vec<String>) -> Result<Vec<Source
             let text = vault
                 .read(&Path::new("log").join(&name))?
                 .unwrap_or_default();
-            out.extend(log_sources(&text));
+            for s in log_sources(&text) {
+                f(s)?;
+            }
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out.dedup_by(|a, b| a.id == b.id);
-    Ok(out)
+    Ok(())
 }
 
 fn entries(vault: &Vault, dir: &str) -> Result<Vec<String>> {

@@ -12,7 +12,7 @@ use crate::chunk;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
 use crate::id::DocId;
-use crate::index::{Index, xdg};
+use crate::index::{Index, missing_vectors, xdg};
 use crate::page;
 use crate::vault::Vault;
 
@@ -52,9 +52,11 @@ pub struct Hit {
 pub struct Found {
     pub hits: Vec<Hit>,
     /// Docs matched before the limit.
+    /// Docs the words matched, plus any shown hit that only the vectors found.
     pub total: usize,
-    /// No vector ranking: the embedder is down or the index has no vectors.
-    pub degraded: bool,
+    /// `no vectors` when only BM25 ranked (the embedder is down, or no chunk has a vector
+    /// from its model); `partial vectors` when some chunks still lack one.
+    pub degraded: Option<&'static str>,
 }
 
 /// One chunk's candidacy.
@@ -85,13 +87,13 @@ pub fn find(
     };
     let params = named_params! {":kind": f.kind, ":since": f.since, ":repo": f.repo};
 
+    // OR: BM25 ranks docs with more terms higher, and RRF needs recall more than an AND.
+    let fts = terms
+        .iter()
+        .map(|t| format!("\"{t}\""))
+        .collect::<Vec<_>>()
+        .join(" OR ");
     if !terms.is_empty() {
-        // OR: BM25 ranks docs with more terms higher, and RRF needs recall more than an AND.
-        let fts = terms
-            .iter()
-            .map(|t| format!("\"{t}\""))
-            .collect::<Vec<_>>()
-            .join(" OR ");
         let sql = format!(
             "SELECT c.id, c.doc, c.ord FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
              JOIN docs d ON d.id = c.doc WHERE chunks_fts MATCH :q {FILTER}
@@ -114,24 +116,30 @@ pub fn find(
         }
     }
 
-    let has_vectors: bool =
-        ix.conn
-            .query_row("SELECT EXISTS (SELECT 1 FROM vectors)", [], |r| r.get(0))?;
+    let has_vectors: bool = ix.conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM vectors WHERE model = ?1)",
+        [&embedder.model],
+        |r| r.get(0),
+    )?;
     let query_vec = if has_vectors {
         embedder.embed_query(q).ok()
     } else {
         None
     };
-    let degraded = query_vec.is_none();
+    let degraded = match &query_vec {
+        None => Some("no vectors"),
+        Some(_) if missing_vectors(ix, &embedder.model)? > 0 => Some("partial vectors"),
+        Some(_) => None,
+    };
     if let Some(qv) = query_vec {
+        // One model's vectors only: two models' cosines do not compare.
         let sql = format!(
             "SELECT c.id, c.doc, c.ord, v.v FROM vectors v JOIN chunks c ON c.id = v.chunk
-             JOIN docs d ON d.id = c.doc WHERE v.dim = :dim {FILTER}"
+             JOIN docs d ON d.id = c.doc WHERE v.model = :model {FILTER}"
         );
         let mut stmt = ix.conn.prepare(&sql)?;
-        let dim = i64::try_from(qv.len()).unwrap_or(0);
         let rows = stmt.query_map(
-            named_params! {":dim": dim, ":kind": f.kind, ":since": f.since, ":repo": f.repo},
+            named_params! {":model": embedder.model, ":kind": f.kind, ":since": f.since, ":repo": f.repo},
             |r| {
                 let blob: Vec<u8> = r.get(3)?;
                 Ok((
@@ -189,8 +197,29 @@ pub fn find(
         docs.insert(0, (page, f64::MAX, chunk));
     }
 
-    let total = docs.len();
-    let mut hits = Vec::with_capacity(limit.min(total));
+    let matched = |doc: Option<&str>| -> Result<usize> {
+        if terms.is_empty() {
+            return Ok(0);
+        }
+        let sql = format!(
+            "SELECT count(DISTINCT c.doc) FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
+             JOIN docs d ON d.id = c.doc WHERE chunks_fts MATCH :q
+             AND (:doc IS NULL OR c.doc = :doc) {FILTER}"
+        );
+        let n: i64 = ix.conn.query_row(
+            &sql,
+            named_params! {":q": fts, ":doc": doc, ":kind": f.kind, ":since": f.since, ":repo": f.repo},
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or(0))
+    };
+    let mut total = matched(None)?;
+    for (id, _, _) in docs.iter().take(limit) {
+        if matched(Some(id))? == 0 {
+            total += 1;
+        }
+    }
+    let mut hits = Vec::with_capacity(limit.min(docs.len()));
     for (id, _, chunk) in docs.into_iter().take(limit) {
         let (kind, date, title, taint, text): (String, String, String, String, String) = ix.conn.query_row(
             "SELECT d.kind, d.date, d.title, d.taint, c.text FROM docs d JOIN chunks c ON c.doc = d.id
@@ -198,13 +227,15 @@ pub fn find(
             [chunk],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
+        let plain = chunk::plain(&text);
         let snippet = if taint == "own" {
-            chunk::snippet(&text, &terms, SNIPPET)
+            chunk::snippet(&plain, &terms, SNIPPET)
         } else {
+            // Defanged before the cut, so the budget holds for the text as printed.
             let room = SNIPPET - OPEN.len() - CLOSE.len() - 2;
             format!(
                 "{OPEN} {} {CLOSE}",
-                defang(&chunk::snippet(&text, &terms, room))
+                chunk::snippet(&defang(&plain), &terms, room)
             )
         };
         hits.push(Hit {
@@ -396,8 +427,9 @@ pub fn get(ix: &Index, spec: &str, full: bool) -> Result<Got> {
             spans: format!("1-{}, or a heading: {}", chunks.len(), headings.join(", ")),
         });
     }
-    let text = picked.join("\n\n");
     let external = taint != "own";
+    let text = picked.join("\n\n");
+    let text = if external { defang(&text) } else { text };
     let budget = if external {
         GET_CHARS - OPEN.len() - CLOSE.len() - 2
     } else {
