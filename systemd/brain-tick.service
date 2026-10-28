@@ -4,5 +4,6 @@ Description=brain tick: run every due job once
 [Service]
 Type=oneshot
 # Under systemd (INVOCATION_ID set) brain commits its vault writes before it exits.
-# The embed job sets its own Nice=19 (S6); the tick itself runs at the default priority.
+# The embed job stops itself after 10 minutes and the next tick continues; the timeout is a backstop.
+TimeoutStartSec=30min
 ExecStart=%h/.local/bin/brain tick

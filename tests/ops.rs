@@ -115,11 +115,24 @@ impl Env {
         let tz = noon_zone();
         let ctx = json!({"tz": tz, "updated_at": "2026-10-27T10:00:00+09:00", "source": "test"});
         fs::write(dir.join("state/context.json"), ctx.to_string()).unwrap();
+        // No GPU unless a test says so: the host's own must not decide the result.
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("nvidia-smi"), "#!/bin/sh\nexit 1\n").unwrap();
+        sh(
+            "chmod",
+            &["+x", bin.join("nvidia-smi").to_str().unwrap()],
+            &[],
+        );
         let env = Self {
+            path: format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
             dir,
             tz,
             embed_url: embed_url.to_owned(),
-            path: std::env::var("PATH").unwrap_or_default(),
         };
         fs::create_dir_all(env.vault()).unwrap();
         env.git(&["init", "-q"]);
@@ -356,20 +369,267 @@ fn a_busy_gpu_skips_the_embed_job_and_logs_it() {
     assert!(env.ok(&["tick", "--dry-run"]).contains("embed,"));
 }
 
+fn lines_of(env: &Env, job: &str) -> Vec<Value> {
+    env.lines("jobs.jsonl")
+        .into_iter()
+        .filter(|l| l["job"] == job)
+        .collect()
+}
+
 #[test]
-fn a_failed_job_fails_the_tick_but_still_writes_its_line() {
+fn a_down_embedder_is_a_skip_not_a_failure() {
     let env = Env::new(&closed_port());
     env.note("aaaa0001", "# Alpha\n\nLeader arm latency.\n");
     env.commit();
     let out = env.run(&["tick"]);
     env.settle();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("skipped: embedder down: embed\n"));
+    let embed = &lines_of(&env, "embed")[0];
+    assert_eq!(
+        (embed["ok"].clone(), embed["err"].clone()),
+        (json!(true), json!("skipped: embedder down"))
+    );
+    assert!(
+        env.ok(&["tick", "--dry-run"])
+            .contains("embed,1 chunks without vectors")
+    );
+}
+
+#[test]
+fn a_failing_job_fails_the_tick_once_and_waits_for_its_inputs_to_change() {
+    let env = Env::new(&closed_port());
+    env.note("aaaa0001", "# Alpha\n\nLeader arm latency.\n");
+    env.write("eval/questions.jsonl", "not json\n");
+    env.commit();
+    let out = env.run(&["tick"]);
+    env.settle();
     assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("error: eval:"));
+    let eval = &lines_of(&env, "eval")[0];
+    assert_eq!(eval["ok"], false);
+    let last = env.lines("jobs.jsonl").pop().unwrap();
+    assert_eq!(
+        (last["job"].clone(), last["ok"].clone()),
+        (json!("tick"), json!(false))
+    );
+    // Same inputs: no second try, and the tick is green.
+    let out = env.run(&["tick"]);
+    env.settle();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(lines_of(&env, "eval").len(), 1);
+    assert!(env.ok(&["tick", "--dry-run"]).contains("eval,"));
+    // A fixed questions file is new inputs.
+    env.write(
+        "eval/questions.jsonl",
+        &format!("{}\n", json!({"q": "latency", "expect": ["file:aaaa0001"]})),
+    );
+    env.commit();
+    env.ok(&["tick"]);
+    assert_eq!(lines_of(&env, "eval").len(), 2);
+    assert_eq!(lines_of(&env, "eval")[1]["ok"], true);
+}
+
+#[test]
+fn one_jobs_error_does_not_stop_the_jobs_after_it() {
+    let mut env = Env::new(&closed_port());
+    env.note("aaaa0001", "# Alpha\n\nLeader arm latency.\n");
+    env.commit();
+    env.ok(&["reindex"]);
+    env.embed_url = fake_embedder();
+    // reindex and the repos due test both read this file; embed does not.
+    env.write("repos.toml", "=== not toml\n");
+    env.commit();
+    let out = env.run(&["tick"]);
+    env.settle();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(lines_of(&env, "reindex")[0]["ok"], false);
+    assert_eq!(lines_of(&env, "repos")[0]["ok"], false);
+    assert_eq!(lines_of(&env, "embed")[0]["ok"], true);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("embed,true,"));
+}
+
+#[test]
+fn eval_waits_for_an_index_with_docs() {
+    let env = Env::new(&closed_port());
+    env.write(
+        "eval/questions.jsonl",
+        &format!("{}\n", json!({"q": "x", "expect": ["file:aaaa0001"]})),
+    );
+    env.commit();
+    let out = env.run(&["tick"]);
+    env.settle();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(lines_of(&env, "eval").is_empty());
+}
+
+#[test]
+fn a_degraded_eval_is_redone_once_the_vectors_are_back() {
+    let mut env = Env::new(&closed_port());
+    env.note(
+        "aaaa0001",
+        "# Alpha\n\nLeader arm latency over the bridge.\n",
+    );
+    env.write(
+        "eval/questions.jsonl",
+        &format!(
+            "{}\n",
+            json!({"q": "leader arm latency", "expect": ["file:aaaa0001"]})
+        ),
+    );
+    env.commit();
+    env.run(&["tick"]);
+    env.settle();
+    assert_eq!(env.lines("eval.jsonl")[0]["degraded"], "no vectors");
+    env.embed_url = fake_embedder();
+    let out = env.ok(&["tick"]);
+    assert!(
+        out.contains("embed,true,") && out.contains("eval,true,"),
+        "{out}"
+    );
+    let runs = env.lines("eval.jsonl");
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1]["degraded"].is_null());
+    assert!(!env.ok(&["tick", "--dry-run"]).contains("eval,"));
+}
+
+#[test]
+fn a_second_tick_while_one_runs_says_so_and_exits_0() {
+    let env = Env::new(&closed_port());
+    fs::create_dir_all(env.dir.join("state/brain")).unwrap();
+    let held = fs::File::create(env.dir.join("state/brain/tick.lock")).unwrap();
+    held.lock().unwrap();
+    let out = env.run(&["tick"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "skipped: tick running\n"
+    );
     let lines = env.lines("jobs.jsonl");
-    let embed = lines.iter().find(|l| l["job"] == "embed").unwrap();
-    assert_eq!(embed["ok"], false);
-    assert!(embed["err"].is_string());
-    assert_eq!(lines.last().unwrap()["job"], "tick");
-    assert_eq!(lines.last().unwrap()["ok"], false);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        (
+            lines[0]["job"].clone(),
+            lines[0]["ok"].clone(),
+            lines[0]["err"].clone()
+        ),
+        (json!("tick"), json!(true), json!("skipped: tick running"))
+    );
+    assert!(!env.vault().join("profile.md").exists());
+    held.unlock().unwrap();
+    assert!(env.ok(&["tick"]).starts_with("ran["));
+}
+
+/// Fake `nvidia-smi` and `ss` first on PATH: ollama's 6380 MiB under a pid of this test,
+/// its listener visible only as a uid, as it is for a service user without root.
+fn gpu_env(env: &mut Env, listener_uid: &str) {
+    let bin = env.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = |name: &str, body: String| {
+        let p = bin.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        sh("chmod", &["+x", p.to_str().unwrap()], &[]);
+    };
+    script("nvidia-smi", format!("echo '{}, 6380'", std::process::id()));
+    script(
+        "ss",
+        format!("echo 'LISTEN 0 4096 *:11434 *:* uid:{listener_uid} ino:1 sk:2'"),
+    );
+    env.path = format!("{}:{}", bin.display(), env.path);
+}
+
+#[test]
+fn the_embedder_servers_own_gpu_memory_is_not_a_busy_gpu() {
+    let mut env = Env::new(&fake_embedder());
+    env.note("aaaa0001", "# Alpha\n\nLeader arm latency.\n");
+    env.commit();
+    // The memory is held by a process of the listener's user: the server's.
+    gpu_env(&mut env, &sh("id", &["-u"], &[]));
+    let out = env.ok(&["tick"]);
+    assert!(out.contains("embed,true,"), "{out}");
+    assert!(!out.contains("gpu busy"), "{out}");
+}
+
+#[test]
+fn memory_of_another_user_than_the_listener_is_a_busy_gpu() {
+    let mut env = Env::new(&fake_embedder());
+    env.note("aaaa0001", "# Alpha\n\nLeader arm latency.\n");
+    env.commit();
+    gpu_env(&mut env, "1");
+    let out = env.ok(&["tick"]);
+    assert!(out.contains("skipped: gpu busy: embed\n"), "{out}");
+}
+
+#[test]
+fn embed_stops_at_its_budget_and_the_next_call_continues() {
+    let env = Env::new(&fake_embedder());
+    for i in 0..70 {
+        env.note(
+            &format!("{i:08x}"),
+            &format!("# Note {i}\n\nWords about topic {i}.\n"),
+        );
+    }
+    env.commit();
+    let embedder = brain::embed::Embedder {
+        url: env.embed_url.clone(),
+        model: "m".to_owned(),
+        batch_secs: 10,
+    };
+    let db = env.dir.join("idx/index.db");
+    let vault = brain::Vault::open(&env.vault()).unwrap();
+    let c = brain::index::reindex_text(&vault, &db, &embedder).unwrap();
+    assert!(c.chunks >= 70);
+    let (n, err) = brain::index::embed(&db, &embedder, std::time::Duration::ZERO).unwrap();
+    assert!(err.is_none());
+    assert!(n > 0 && n < c.chunks, "{n} of {}", c.chunks);
+    let left = brain::index::unembedded(&db, "m").unwrap();
+    assert_eq!(left, c.chunks - n);
+    let (rest, _) =
+        brain::index::embed(&db, &embedder, std::time::Duration::from_secs(60)).unwrap();
+    assert_eq!(rest, left);
+    assert_eq!(brain::index::unembedded(&db, "m").unwrap(), 0);
+}
+
+#[test]
+fn concurrent_reindexes_do_not_collide_on_the_index() {
+    let env = Env::new(&closed_port());
+    for i in 0..40 {
+        env.note(
+            &format!("{i:08x}"),
+            &format!("# Note {i}\n\nWords about topic {i}.\n"),
+        );
+    }
+    env.commit();
+    let embedder = brain::embed::Embedder {
+        url: env.embed_url.clone(),
+        model: "m".to_owned(),
+        batch_secs: 1,
+    };
+    let db = env.dir.join("idx/index.db");
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                s.spawn(|| {
+                    let vault = brain::Vault::open(&env.vault()).unwrap();
+                    brain::index::reindex_text(&vault, &db, &embedder)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+    });
+    assert!(brain::index::built(&db));
 }
 
 fn tokens(s: &str) -> usize {

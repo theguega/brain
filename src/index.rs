@@ -3,8 +3,9 @@
 //! makes it match them again.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde_json::{Value, json};
@@ -176,9 +177,36 @@ pub fn reindex_text(vault: &Vault, path: &Path, embedder: &Embedder) -> Result<C
     sync(vault, path, false, embedder, false)
 }
 
-/// Fills the chunks without a vector; the error is the embedder's, after the vectors it did give.
-pub fn embed(path: &Path, embedder: &Embedder) -> Result<(usize, Option<Error>)> {
-    Ok(embed_missing(&mut Index::open_existing(path)?, embedder))
+/// Fills the chunks without a vector, stopping once `budget` is spent (after at least one
+/// batch); the rest waits for the next call. The error is the embedder's, after the vectors
+/// it did give.
+pub fn embed(path: &Path, embedder: &Embedder, budget: Duration) -> Result<(usize, Option<Error>)> {
+    let mut ix = Index::open_existing(path)?;
+    Ok(embed_missing(
+        &mut ix,
+        embedder,
+        Some(Instant::now() + budget),
+    ))
+}
+
+/// Held while a reindex or a batch of vectors is written: they would collide on SQLite's
+/// single writer (`database is locked`) whoever started them, a tick or a person.
+fn write_lock(db: &Path) -> Result<File> {
+    let mut name = db.as_os_str().to_owned();
+    name.push(".lock");
+    let path = PathBuf::from(name);
+    let f = io(
+        OpenOptions::new().create(true).append(true).open(&path),
+        &path,
+    )?;
+    io(f.lock(), &path)?;
+    Ok(f)
+}
+
+/// Whether there is an index with docs in it, the one readers need.
+#[must_use]
+pub fn built(path: &Path) -> bool {
+    Index::open_existing(path).is_ok()
 }
 
 /// Chunks without a vector from `model`; none when there is no index yet.
@@ -191,6 +219,10 @@ pub fn unembedded(path: &Path, model: &str) -> Result<usize> {
 }
 
 fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool) -> Result<Counts> {
+    if let Some(dir) = path.parent() {
+        io(fs::create_dir_all(dir), dir)?;
+    }
+    let lock = write_lock(path)?;
     if full {
         remove(path)?;
     }
@@ -284,9 +316,10 @@ fn sync(vault: &Vault, path: &Path, full: bool, embedder: &Embedder, fill: bool)
         }
     }
     tx.commit()?;
+    drop(lock);
 
     if fill {
-        let (embedded, err) = embed_missing(&mut ix, embedder);
+        let (embedded, err) = embed_missing(&mut ix, embedder, None);
         counts.embedded = embedded;
         if let Some(e) = err {
             counts.warnings.push(format!("embedder: {e}"));
@@ -405,7 +438,11 @@ pub(crate) fn missing_vectors(ix: &Index, model: &str) -> Result<usize> {
 
 /// Fills every chunk that has no vector from the embedder's model, one batch in memory
 /// at a time. Stops at the first embedder failure, keeping the vectors so far.
-fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) {
+fn embed_missing(
+    ix: &mut Index,
+    embedder: &Embedder,
+    deadline: Option<Instant>,
+) -> (usize, Option<Error>) {
     let mut done = 0;
     let mut after = 0_i64;
     loop {
@@ -431,6 +468,12 @@ fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) 
         };
         let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
         let stored = embedder.embed(&texts).and_then(|vs| {
+            // Not held across the request: a reindex waits one batch, not the embedder.
+            let _lock = ix
+                .conn
+                .path()
+                .map(|p| write_lock(Path::new(p)))
+                .transpose()?;
             let tx = ix.conn.transaction()?;
             for ((id, _), v) in batch.iter().zip(&vs) {
                 tx.execute(
@@ -449,6 +492,9 @@ fn embed_missing(ix: &mut Index, embedder: &Embedder) -> (usize, Option<Error>) 
         match stored {
             Ok(()) => done += batch.len(),
             Err(e) => return (done, Some(e)),
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return (done, None);
         }
         after = batch.last().map_or(after, |(id, _)| *id);
     }

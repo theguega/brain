@@ -6,8 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::OptionalExtension as _;
 use serde::{Deserialize, Serialize};
@@ -21,7 +20,12 @@ use crate::vault::{Vault, git, read_json, write_atomic};
 use crate::{eval, gpu, profile, repos, state};
 
 const STATE: &str = "tick.json";
+const LOCK: &str = "tick.lock";
 const JOBS: &str = "jobs.jsonl";
+/// One tick's share of embedding: a first run over 10⁵ chunks continues over the next ticks.
+const EMBED_BUDGET: Duration = Duration::from_secs(600);
+/// A job that failed on the same inputs waits this long before it tries again.
+const RETRY_SECS: u64 = 3600;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -82,9 +86,37 @@ struct State {
     /// Cron job to the local day it last ran.
     #[serde(default)]
     days: BTreeMap<String, String>,
+    /// Job to its last failure.
+    #[serde(default)]
+    failed: BTreeMap<String, Failed>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Failed {
+    /// What the job depended on when it failed: it retries early only if that changed.
+    key: String,
+    at: u64,
+}
+
+fn epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A job that is due, why, and the inputs that make this run different from the last.
+struct Due {
+    why: String,
+    key: String,
 }
 
 impl State {
+    fn backing_off(&self, job: &str, key: &str) -> bool {
+        self.failed
+            .get(job)
+            .is_some_and(|f| f.key == key && epoch().saturating_sub(f.at) < RETRY_SECS)
+    }
+
     fn path() -> Result<PathBuf> {
         Ok(state::dir()?.join(STATE))
     }
@@ -104,7 +136,7 @@ impl State {
             crate::error::io(std::fs::create_dir_all(d), d)?;
         }
         let mut s = serde_json::to_string(
-            &json!({"version": 1, "indexed_head": self.indexed_head, "days": self.days}),
+            &json!({"version": 1, "indexed_head": self.indexed_head, "days": self.days, "failed": self.failed}),
         )
         .map_err(|source| Error::Json {
             path: p.clone(),
@@ -124,43 +156,70 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// Why `job` is due, or `None`.
-    fn due(&self, job: &Job, st: &State) -> Result<Option<String>> {
+    fn due(&self, job: &Job, st: &State) -> Result<Option<Due>> {
         let name = job.name;
+        let due = |why: String, key: &str| {
+            Some(Due {
+                why,
+                key: key.to_owned(),
+            })
+        };
         Ok(match (name, job.kind) {
             (_, Kind::Cron(at)) => {
                 let last = st.days.get(name).map(String::as_str);
-                cron_due(&self.now, at, last).then(|| {
-                    format!(
+                cron_due(&self.now, at, last).then(|| Due {
+                    why: format!(
                         "{at} local has passed; last run {}",
                         last.unwrap_or("never")
-                    )
+                    ),
+                    key: self.now.day().to_owned(),
                 })
             }
             ("reindex", _) => {
                 if !self.db.is_file() {
-                    Some("no index yet".to_owned())
+                    due("no index yet".to_owned(), "no index")
                 } else {
                     let last = st.indexed_head.as_deref();
-                    (last != Some(self.head.as_str())).then(|| {
-                        format!(
-                            "vault HEAD moved: {} -> {}",
-                            short(last.unwrap_or("none")),
-                            short(&self.head)
+                    if last == Some(self.head.as_str()) {
+                        None
+                    } else {
+                        due(
+                            format!(
+                                "vault HEAD moved: {} -> {}",
+                                short(last.unwrap_or("none")),
+                                short(&self.head)
+                            ),
+                            &self.head,
                         )
-                    })
+                    }
                 }
             }
             ("repos", _) => {
                 let moved = self.moved_repos()?;
-                (!moved.is_empty()).then(|| format!("HEAD moved in {}", moved.join(", ")))
+                if moved.is_empty() {
+                    None
+                } else {
+                    due(
+                        format!("HEAD moved in {}", moved.join(", ")),
+                        &moved.join(","),
+                    )
+                }
             }
             ("embed", _) => {
                 let n = index::unembedded(&self.db, &self.embedder.model)?;
-                (n > 0).then(|| format!("{n} chunks without vectors"))
+                if n == 0 {
+                    None
+                } else {
+                    due(format!("{n} chunks without vectors"), &n.to_string())
+                }
             }
-            ("eval", _) => eval::due(self.vault)?
-                .then(|| "retrieval code or eval/questions.jsonl changed".to_owned()),
+            ("eval", _) => match eval::due(self.vault, &self.embedder)? {
+                Some(why) => due(
+                    why.to_owned(),
+                    &eval::inputs(self.vault)?.unwrap_or_default(),
+                ),
+                None => None,
+            },
             _ => None,
         })
     }
@@ -201,9 +260,11 @@ impl Ctx<'_> {
                 if gpu::busy(&self.embedder.url) {
                     return Ok(Done::Skipped("gpu busy"));
                 }
-                nice();
-                if let (_, Some(e)) = index::embed(&self.db, &self.embedder)? {
-                    return Err(e);
+                match index::embed(&self.db, &self.embedder, EMBED_BUDGET)? {
+                    // B12: no embedder is a degraded mode, not an error; the chunks stay due.
+                    (_, Some(Error::Network { .. })) => return Ok(Done::Skipped("embedder down")),
+                    (_, Some(e)) => return Err(e),
+                    _ => {}
                 }
             }
             "profile" => {
@@ -219,21 +280,10 @@ impl Ctx<'_> {
     }
 }
 
-/// Past `at` on the local clock, and not yet run on this local day. The day comes from the
-/// zone in C15, so a flight that changes the date makes the job due once more.
+/// Past `at` on the local clock, and last run on an earlier local day. The day comes from the
+/// zone in C15: flying east into the next date makes the job due, flying west never repeats it.
 fn cron_due(now: &Now, at: &str, last_day: Option<&str>) -> bool {
-    now.at.get(11..16).unwrap_or_default() >= at && last_day != Some(now.day())
-}
-
-/// S6: the embed job runs at `Nice=19`, set in-process so `brain embed`-like work needs no unit setting.
-fn nice() {
-    let ok = Command::new("renice")
-        .args(["-n", "19", "-p", &std::process::id().to_string()])
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !ok {
-        eprintln!("warning: could not renice to 19");
-    }
+    now.at.get(11..16).unwrap_or_default() >= at && last_day.is_none_or(|l| l < now.day())
 }
 
 fn short(head: &str) -> &str {
@@ -300,16 +350,33 @@ pub fn dry_run(vault: &Vault) -> Result<Report> {
         ..Report::default()
     };
     for j in TABLE.iter().filter(|j| j.run == Run::Here) {
-        if let Some(why) = ctx.due(j, &st)? {
-            report.due.push((j.name, why));
+        match ctx.due(j, &st) {
+            Ok(Some(d)) => {
+                let wait = if st.backing_off(j.name, &d.key) {
+                    " (failed last time on these inputs: waits)"
+                } else {
+                    ""
+                };
+                report.due.push((j.name, format!("{}{wait}", d.why)));
+            }
+            Ok(None) => {}
+            Err(e) => report.due.push((j.name, format!("error: {e}"))),
         }
     }
     Ok(report)
 }
 
-/// Runs every due job once, then appends the tick's own C10 line.
+/// Runs every due job once, then appends the tick's own C10 line. A second tick while one
+/// runs does nothing but say so.
 pub fn run(vault: &Vault) -> Result<Report> {
     let started = time::now()?.at;
+    let Some(_lock) = state::lock(LOCK)? else {
+        line("tick", &started, true, Some("skipped: tick running"))?;
+        return Ok(Report {
+            skipped: vec![("tick running", Vec::new())],
+            ..Report::default()
+        });
+    };
     let result = run_jobs(vault);
     let (ok, err) = match &result {
         Ok(r) => (!r.failed(), None),
@@ -319,6 +386,7 @@ pub fn run(vault: &Vault) -> Result<Report> {
     result
 }
 
+/// One job's error, in its `due` test or its run, is that job's failure: the others still run.
 fn run_jobs(vault: &Vault) -> Result<Report> {
     let (ctx, mut st) = (context(vault)?, State::load()?);
     let mut report = Report {
@@ -326,20 +394,28 @@ fn run_jobs(vault: &Vault) -> Result<Report> {
         ..Report::default()
     };
     for j in TABLE.iter().filter(|j| j.run == Run::Here) {
-        // After the earlier jobs: reindex may have made embed due.
-        if ctx.due(j, &st)?.is_none() {
-            continue;
-        }
+        // Tested one by one: reindex may have made embed due.
         let started = time::now()?.at;
         let clock = Instant::now();
-        let outcome = ctx.exec(j.name, &mut st);
+        let (key, outcome) = match ctx.due(j, &st) {
+            Ok(None) => continue,
+            Ok(Some(d)) if st.backing_off(j.name, &d.key) => continue,
+            Ok(Some(d)) => (d.key, ctx.exec(j.name, &mut st)),
+            Err(e) => {
+                let key = format!("due: {e}");
+                if st.backing_off(j.name, &key) {
+                    continue;
+                }
+                (key, Err(e))
+            }
+        };
         let took = clock.elapsed();
         let (err, skipped) = match outcome {
             Ok(Done::Ran) => (None, None),
             Ok(Done::Skipped(why)) => (Some(format!("skipped: {why}")), Some(why)),
             Err(e) => (Some(e.to_string()), None),
         };
-        // A skip is not a failure: the job stays due and runs when the GPU frees up.
+        // A skip is not a failure: the job stays due and runs when the cause is gone.
         line(
             j.name,
             &started,
@@ -350,9 +426,16 @@ fn run_jobs(vault: &Vault) -> Result<Report> {
             report.skipped.push((why, vec![j.name]));
             continue;
         }
-        if err.is_none() {
-            st.save()?;
+        match &err {
+            Some(_) => {
+                st.failed
+                    .insert(j.name.to_owned(), Failed { key, at: epoch() });
+            }
+            None => {
+                st.failed.remove(j.name);
+            }
         }
+        st.save()?;
         report.ran.push(Ran {
             job: j.name,
             took,
@@ -409,9 +492,9 @@ mod tests {
         assert!(cron_due(&paris, "03:00", None));
         assert!(cron_due(&paris, "03:00", Some("2026-10-27")));
         assert!(!cron_due(&paris, "03:00", Some("2026-10-28")));
-        // Fly west after the run: the same instant is still the 27th, already run.
+        // Fly west after the run (stored: the 28th): the same instant is still the 27th.
         let sf = ctx_at("2026-10-27T19:10:00-07:00");
-        assert!(!cron_due(&sf, "03:00", Some("2026-10-27")));
+        assert!(!cron_due(&sf, "03:00", Some("2026-10-28")));
         // Fly east: it is the next local day at 04:00, due again.
         let tokyo = ctx_at("2026-10-29T04:00:00+09:00");
         assert!(cron_due(&tokyo, "03:00", Some("2026-10-28")));

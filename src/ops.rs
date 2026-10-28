@@ -123,7 +123,13 @@ fn skipped(report: &Report) -> Vec<Reply> {
     report
         .skipped
         .iter()
-        .map(|(why, jobs)| Reply::Text(format!("skipped: {why}: {}", jobs.join(", "))))
+        .map(|(why, jobs)| {
+            Reply::Text(if jobs.is_empty() {
+                format!("skipped: {why}")
+            } else {
+                format!("skipped: {why}: {}", jobs.join(", "))
+            })
+        })
         .collect()
 }
 

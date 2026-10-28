@@ -69,15 +69,34 @@ pub fn last() -> Result<Option<Score>> {
     Ok(state::last(FILE)?.and_then(|v| Score::of(&v)))
 }
 
-/// Whether the retrieval code or the questions differ from the last run.
-pub fn due(vault: &Vault) -> Result<bool> {
+/// What a run depends on: the build and the questions. `None` when there is nothing to
+/// run: no questions, or no index with docs in it (`run` needs one).
+pub fn inputs(vault: &Vault) -> Result<Option<String>> {
     let Some(text) = vault.read(Path::new(QUESTIONS))? else {
-        return Ok(false);
+        return Ok(None);
     };
-    if text.trim().is_empty() || !index::db_path()?.is_file() {
-        return Ok(false);
+    if text.trim().is_empty() || !index::built(&index::db_path()?) {
+        return Ok(None);
     }
-    Ok(last()?.is_none_or(|l| l.brain != BRAIN || l.questions_hash != fnv(&text)))
+    Ok(Some(format!("{BRAIN}:{}", fnv(&text))))
+}
+
+/// Why a run is due: the build or the questions changed since the last run, or the last
+/// run was degraded and the vectors are back.
+pub fn due(vault: &Vault, embedder: &Embedder) -> Result<Option<&'static str>> {
+    let Some(key) = inputs(vault)? else {
+        return Ok(None);
+    };
+    let Some(last) = last()? else {
+        return Ok(Some("never run"));
+    };
+    if format!("{}:{}", last.brain, last.questions_hash) != key {
+        return Ok(Some("retrieval code or eval/questions.jsonl changed"));
+    }
+    let whole = index::unembedded(&index::db_path()?, &embedder.model)? == 0
+        && embedder.embed_query("ping").is_ok();
+    Ok((last.degraded.is_some() && whole)
+        .then_some("the last run was degraded and vectors are back"))
 }
 
 /// FNV-1a, as the index hashes docs: stable across Rust versions.
