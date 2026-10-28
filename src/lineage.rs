@@ -1,6 +1,7 @@
-//! Papers with Code lineage. A paper whose `lineage` is unset has never had an answer
-//! from PwC; `reindex` retries a few of those each time, and remembers when it tried in
-//! the index, so the vault holds only what PwC said.
+//! Papers with Code lineage, as a paper's `builds_on` property: wikilinks to its PwC
+//! predecessors and successors. A paper without `builds_on` has never had an answer from
+//! PwC; `reindex` retries a few of those each time, and remembers when it tried in the
+//! index, so the vault holds only what PwC said.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,12 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{OptionalExtension as _, params};
 use serde_json::Value;
 
-use crate::doc::Edge;
-use crate::error::{Error, Result};
-use crate::id::{ArxivId, DocId, Rel};
+use crate::doc::{self, Fields};
+use crate::error::Result;
+use crate::id::{ArxivId, DocId};
 use crate::index::Index;
-use crate::pwc;
 use crate::vault::Vault;
+use crate::{note, pwc};
 
 /// Papers retried per reindex: PwC is slow, and a reindex should stay quick.
 pub const PER_REINDEX: usize = 10;
@@ -23,37 +24,30 @@ const AGAIN_AFTER: i64 = 24 * 3600;
 /// A PwC lookup: `Ok(None)` when PwC does not know the paper, `Err` when it is down.
 pub type Lookup<'a> = &'a dyn Fn(&ArxivId) -> Result<Option<pwc::Paper>>;
 
-/// PwC predecessors and successors as `builds_on` edges, whether or not they are in the vault.
+/// PwC predecessors and successors, once each, whether or not they are in the vault.
 #[must_use]
-pub fn edges(id: &DocId, pwc: &pwc::Paper) -> Vec<Edge> {
-    let ids = |v: &Option<Vec<pwc::Related>>| {
-        v.iter()
-            .flatten()
-            .filter_map(|r| {
-                ArxivId::parse(r.arxiv_id.as_deref()?)
-                    .ok()
-                    .map(DocId::Arxiv)
-            })
-            .collect::<Vec<_>>()
-    };
-    let Ok(rel) = Rel::parse(Rel::BUILDS_ON) else {
-        return Vec::new();
-    };
-    let edge = |src: DocId, dst: DocId| Edge {
-        src,
-        dst,
-        rel: rel.clone(),
-    };
-    let mut out: Vec<Edge> = ids(&pwc.predecessor_papers)
+pub fn related(id: &DocId, pwc: &pwc::Paper) -> Vec<DocId> {
+    let mut out: Vec<DocId> = Vec::new();
+    for r in [&pwc.predecessor_papers, &pwc.successor_papers]
         .into_iter()
-        .map(|p| edge(id.clone(), p))
-        .collect();
-    out.extend(
-        ids(&pwc.successor_papers)
-            .into_iter()
-            .map(|s| edge(s, id.clone())),
-    );
+        .flatten()
+        .flatten()
+    {
+        if let Some(Ok(other)) = r.arxiv_id.as_deref().map(ArxivId::parse)
+            && let other = DocId::Arxiv(other)
+            && other != *id
+            && !out.contains(&other)
+        {
+            out.push(other);
+        }
+    }
     out
+}
+
+/// `builds_on` as written: a wikilink to each doc's note.
+#[must_use]
+pub fn builds_on(ids: &[DocId]) -> Vec<String> {
+    ids.iter().map(|id| note::wikilink(&id.dir())).collect()
 }
 
 /// What a PwC reply adds to a paper.
@@ -61,7 +55,7 @@ pub fn edges(id: &DocId, pwc: &pwc::Paper) -> Vec<Edge> {
 pub struct Answer {
     /// `None` unless PwC has a record for the paper: a 404 or an empty `{}` is no
     /// answer, and the paper is retried. A record's `null` lists mean none, so `[]`.
-    pub lineage: Option<Vec<Edge>>,
+    pub lineage: Option<Vec<DocId>>,
     pub tldr: Option<String>,
     pub venue: Option<String>,
 }
@@ -75,24 +69,18 @@ impl Answer {
         let answered =
             p.arxiv_id.is_some() || p.predecessor_papers.is_some() || p.successor_papers.is_some();
         Self {
-            lineage: answered.then(|| edges(id, &p)),
+            lineage: answered.then(|| related(id, &p)),
             tldr: p.tldr.filter(|t| !t.is_empty()),
             venue: p.conference_name.filter(|v| !v.is_empty()),
         }
     }
 
-    /// Sets `lineage` if answered, and `tldr` and `venue` where unset. `true` if it changed.
-    pub fn fill(self, meta: &mut Value) -> Result<bool> {
-        let Some(obj) = meta.as_object_mut() else {
-            return Ok(false);
-        };
+    /// Sets `builds_on` if answered, and `tldr` and `venue` where unset. `true` if it changed.
+    pub fn fill(self, obj: &mut Fields) -> bool {
         let mut changed = false;
-        if let Some(edges) = self.lineage {
-            let v = serde_json::to_value(edges).map_err(|source| Error::Decode {
-                what: "lineage",
-                source,
-            })?;
-            obj.insert("lineage".to_owned(), v);
+        if let Some(ids) = self.lineage {
+            let links = builds_on(&ids).into_iter().map(Value::String).collect();
+            obj.insert("builds_on".to_owned(), Value::Array(links));
             changed = true;
         }
         for (k, v) in [("tldr", self.tldr), ("venue", self.venue)] {
@@ -103,7 +91,7 @@ impl Answer {
                 changed = true;
             }
         }
-        Ok(changed)
+        changed
     }
 }
 
@@ -153,16 +141,12 @@ pub fn retry(vault: &Vault, index: &Path, limit: usize, lookup: Lookup<'_>) -> R
             Ok(found) => {
                 let answer = Answer::of(&id, found);
                 let answered = answer.lineage.is_some();
-                let rel = Vault::doc_dir(&id).join("meta.json");
+                let rel = doc::path(&id);
                 vault.update(&rel, |old| {
                     let Some(old) = old else { return Ok(None) };
-                    let mut meta: Value =
-                        serde_json::from_str(&old).map_err(|source| Error::Json {
-                            path: rel.clone(),
-                            source,
-                        })?;
-                    if answer.fill(&mut meta)? {
-                        pretty(&meta, &rel).map(Some)
+                    let (mut fm, body) = note::read(&old, &rel)?;
+                    if answer.fill(&mut fm) {
+                        doc::text(&id, fm, &body).map(Some)
                     } else {
                         Ok(None)
                     }
@@ -178,17 +162,7 @@ pub fn retry(vault: &Vault, index: &Path, limit: usize, lookup: Lookup<'_>) -> R
     Ok(out)
 }
 
-/// Pretty JSON with a trailing newline, as [`Vault::write_json`] writes it.
-pub(crate) fn pretty(v: &Value, rel: &Path) -> Result<String> {
-    let mut s = serde_json::to_string_pretty(v).map_err(|source| Error::Json {
-        path: rel.to_owned(),
-        source,
-    })?;
-    s.push('\n');
-    Ok(s)
-}
-
-/// arXiv papers whose meta has no `lineage` key, in id order.
+/// arXiv papers whose note has no `builds_on` key, in id order.
 fn without_lineage(vault: &Vault) -> Result<Vec<(DocId, ArxivId)>> {
     let docs = vault.path(Path::new("docs"));
     if !docs.is_dir() {
@@ -203,16 +177,12 @@ fn without_lineage(vault: &Vault) -> Result<Vec<(DocId, ArxivId)>> {
         let Ok(id @ DocId::Arxiv(_)) = DocId::from_dir(&name) else {
             continue;
         };
-        let rel = Vault::doc_dir(&id).join("meta.json");
-        let Some(raw) = vault.read(&rel)? else {
-            continue;
-        };
-        // An unreadable meta is `brain lint`'s to report, not this retry's.
-        let Ok(meta) = serde_json::from_str::<Value>(&raw) else {
+        // An unreadable note is `brain lint`'s to report, not this retry's.
+        let Ok(Some((meta, _))) = doc::read(vault, &id) else {
             continue;
         };
         if meta.get("kind").and_then(Value::as_str) == Some("paper")
-            && meta.get("lineage").is_none()
+            && meta.get("builds_on").is_none()
             && let DocId::Arxiv(aid) = &id
         {
             out.push((id.clone(), aid.clone()));

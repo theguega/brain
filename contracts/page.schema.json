@@ -3,7 +3,7 @@
   "$id": "https://brain.local/contracts/page.schema.json",
   "version": 1,
   "title": "C2 page frontmatter",
-  "description": "The YAML frontmatter of pages/<slug>.md, as JSON. links holds one {rel: target} pair per item, written by `brain link`.",
+  "description": "The YAML frontmatter of pages/<slug>.md, as JSON. A key whose values are wikilinks is a typed relation (`brain link` writes them), and any other key warns.",
   "type": "object",
   "properties": {
     "kind": {
@@ -41,22 +41,7 @@
     },
     "superseded_by": {
       "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
-    },
-    "links": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "minProperties": 1,
-        "maxProperties": 1,
-        "propertyNames": {
-          "pattern": "^[a-z][a-z0-9_]*$"
-        },
-        "additionalProperties": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
+      "pattern": "^\\[\\[[a-z0-9][a-z0-9-]{0,63}\\]\\]$"
     },
     "aliases": {
       "type": "array",
@@ -83,5 +68,5 @@
     "sources",
     "updated"
   ],
-  "$comment": "Any other key is allowed, and `brain lint` warns about it."
+  "$comment": "Any other key is allowed: a wikilink-valued one is a relation, the rest make `brain lint` warn."
 }

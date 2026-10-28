@@ -178,13 +178,12 @@ impl Env {
     }
 
     fn note(&self, name: &str, text: &str) {
+        let meta = json!({"id": format!("file:{name}"), "kind": "note", "taint": "own",
+            "added": "2026-10-21T09:00:00+02:00", "title": name});
         self.write(
-            &format!("docs/file--{name}/meta.json"),
-            &json!({"id": format!("file:{name}"), "kind": "note", "taint": "own",
-                "added": "2026-10-21T09:00:00+02:00", "title": name})
-            .to_string(),
+            &format!("docs/file--{name}/file--{name}.md"),
+            &format!("---\n{meta}\n---\n{text}"),
         );
-        self.write(&format!("docs/file--{name}/text.md"), text);
     }
 
     fn state(&self, file: &str) -> String {

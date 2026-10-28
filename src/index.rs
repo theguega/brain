@@ -11,6 +11,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use serde_json::{Value, json};
 
 use crate::chunk::{self, Chunk};
+use crate::contract::Kind;
 use crate::doc::Taint;
 use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
@@ -18,7 +19,7 @@ use crate::id::{DocId, Slug};
 use crate::log::Entry;
 use crate::repos::{self, Repo, Scan};
 use crate::vault::Vault;
-use crate::{contract::Kind, page};
+use crate::{doc, note, page};
 
 /// Bumped on any change to the tables or to chunking: a mismatch drops the index.
 pub const SCHEMA: i32 = 2;
@@ -448,11 +449,17 @@ fn delete(tx: &Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Docs and pages that link to the repo: by its name, its card id, or its remote.
+/// Docs and pages that link to the repo: by its name, its card id, or its remote, which
+/// a paper names in its `links{code, ...}` URLs.
 fn linked_from(tx: &Transaction<'_>, repo: &Repo, remote: Option<&str>) -> Result<Vec<String>> {
     let remote = remote.map(repos::canonical_url);
     let card = format!("repo:{}", repo.name);
-    let mut stmt = tx.prepare("SELECT src, dst FROM links WHERE src NOT LIKE 'repo:%'")?;
+    let mut stmt = tx.prepare(
+        "SELECT src, dst FROM links WHERE src NOT LIKE 'repo:%'
+         UNION ALL SELECT d.id, j.value FROM docs d, json_each(d.meta, '$.links') j
+         WHERE d.id NOT LIKE 'repo:%' AND json_type(d.meta, '$.links') = 'object'
+            AND j.type = 'text'",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut out = BTreeSet::new();
     for row in rows {
@@ -599,15 +606,11 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
 fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     let id = DocId::from_dir(dir)?;
     let rel = Path::new("docs").join(dir);
-    let meta_path = rel.join("meta.json");
-    let raw = vault.read(&meta_path)?.ok_or_else(|| Error::Invalid {
-        path: meta_path.clone(),
+    let (fm, body) = doc::read(vault, &id)?.ok_or_else(|| Error::Invalid {
+        path: doc::path(&id),
         why: "missing".to_owned(),
     })?;
-    let meta: Value = serde_json::from_str(&raw).map_err(|source| Error::Json {
-        path: meta_path,
-        source,
-    })?;
+    let meta = Value::Object(fm);
     let kind = str_of(&meta, "kind").unwrap_or("note").to_owned();
     let taint = match str_of(&meta, "taint") {
         Some("own") => Taint::Own,
@@ -631,34 +634,12 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
     }
     if let Some(html) = vault.read(&rel.join("index.html"))? {
         text.push_str(&chunk::html_text(&html));
-    } else if let Some(md) = vault.read(&rel.join("text.md"))? {
-        text.push_str(&md);
     }
+    text.push_str(&body);
     let id = id.to_string();
-    let mut links = Vec::new();
-    if let Some(Value::Object(l)) = meta.get("links") {
-        links.extend(
-            l.iter()
-                .filter_map(|(rel, v)| Some((v.as_str()?.to_owned(), rel.clone()))),
-        );
-    }
-    if let Some(Value::Array(edges)) = meta.get("lineage") {
-        for e in edges {
-            if str_of(e, "src") == Some(id.as_str())
-                && let (Some(dst), Some(rel)) = (str_of(e, "dst"), str_of(e, "rel"))
-            {
-                links.push((dst.to_owned(), rel.to_owned()));
-            }
-        }
-    }
-    if let Some(Value::Array(a)) = meta.get("attendees") {
-        links.extend(
-            a.iter()
-                .filter_map(|s| Some((s.as_str()?.to_owned(), "attendee".to_owned()))),
-        );
-    }
-    if let Some(p) = str_of(&meta, "project") {
-        links.push((p.to_owned(), "project".to_owned()));
+    let mut links = note::body_links(&body);
+    if let Value::Object(fm) = &meta {
+        links.extend(note::relations(fm));
     }
     Ok(Source {
         title: str_of(&meta, "title").unwrap_or(&id).to_owned(),
@@ -675,35 +656,10 @@ fn doc_source(vault: &Vault, dir: &str) -> Result<Source> {
 fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
     let path = Path::new("pages").join(format!("{slug}.md"));
     let raw = vault.read(&path)?.unwrap_or_default();
-    let (yaml, body) = page::split(&raw).ok_or_else(|| Error::Invalid {
-        path: path.clone(),
-        why: "no frontmatter".to_owned(),
-    })?;
-    let fm = page::parse_yaml(yaml).map_err(|(line, why)| Error::Frontmatter {
-        path,
-        line: line + 1,
-        why,
-    })?;
+    let (fm, body) = note::read(&raw, &path)?;
+    let mut links = note::body_links(&body);
+    links.extend(note::relations(&fm));
     let fm = Value::Object(fm);
-    let mut links: Vec<(String, String)> = Vec::new();
-    if let Some(Value::Array(ls)) = fm.get("links") {
-        for l in ls {
-            if let Some((rel, Value::String(dst))) = l.as_object().and_then(|o| o.iter().next()) {
-                links.push((dst.clone(), rel.clone()));
-            }
-        }
-    }
-    if let Some(Value::Array(src)) = fm.get("sources") {
-        links.extend(
-            src.iter()
-                .filter_map(|s| Some((s.as_str()?.to_owned(), "cites".to_owned()))),
-        );
-    }
-    links.extend(
-        wikilinks(body)
-            .into_iter()
-            .map(|w| (w, "mentions".to_owned())),
-    );
     Ok(Source {
         id: slug.to_owned(),
         kind: str_of(&fm, "kind").unwrap_or("page").to_owned(),
@@ -712,7 +668,7 @@ fn page_source(vault: &Vault, slug: &str) -> Result<Source> {
             .map(|d| d.get(..10).unwrap_or(d).to_owned())
             .unwrap_or_default(),
         taint: Taint::Own,
-        text: body.to_owned(),
+        text: body,
         meta: fm,
         links,
     })
@@ -726,23 +682,6 @@ pub(crate) fn doc_spans(vault: &Vault, id: &DocId) -> Result<Vec<String>> {
         .into_iter()
         .map(|c| c.heading)
         .collect())
-}
-
-/// `[[target]]`, `[[target|label]]`, `[[target#span]]`, as targets, in order, once each.
-pub(crate) fn wikilinks(body: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = body;
-    while let Some(i) = rest.find("[[") {
-        rest = rest.get(i + 2..).unwrap_or_default();
-        let Some(end) = rest.find("]]") else { break };
-        let inner = rest.get(..end).unwrap_or_default();
-        let target = inner.split(['|', '#']).next().unwrap_or_default().trim();
-        if !target.is_empty() && !out.iter().any(|t| t == target) {
-            out.push(target.to_owned());
-        }
-        rest = rest.get(end + 2..).unwrap_or_default();
-    }
-    out
 }
 
 /// One source per C3 block: `log:<at>`, with `-2`, `-3`... for blocks at the same second.
@@ -790,11 +729,6 @@ fn log_sources(text: &str) -> Vec<Source> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wikilinks_are_targets() {
-        assert_eq!(wikilinks("a [[x]] b [[y|Y]] [[x#2]] [[ ]]"), ["x", "y"]);
-    }
 
     #[test]
     fn log_blocks_are_sources() {

@@ -1,5 +1,6 @@
-//! `brain add` (B2, B13, B14): a source becomes `docs/<id>/`. Idempotent: a source already
-//! in the vault is left untouched.
+//! `brain add` (B2, B13, B14): a source becomes the note `docs/<dir>/<dir>.md`, with an
+//! artifact's `index.html` beside it. Idempotent: a source already in the vault is left
+//! untouched.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -9,12 +10,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::contract::{Kind, Problem, Schema};
-use crate::doc::{Artifact, Doc, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
+use crate::doc::{self, Artifact, Doc, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web};
 use crate::error::{Error, Result, io};
 use crate::id::{ArxivId, DocId, Slug, canonical_url, host_path};
 use crate::time::{self, Now};
-use crate::vault::{Vault, read_json};
-use crate::{alphaxiv, arxiv, hub, lineage, net, page, pwc};
+use crate::vault::Vault;
+use crate::{alphaxiv, arxiv, hub, lineage, net, note, pwc};
+
+/// An artifact's page, kept beside its note.
+pub(crate) const ARTIFACT_FILE: &str = "index.html";
 
 /// Set by brain, never by a file's frontmatter: the envelope of every doc.
 const ENVELOPE: &[&str] = &["id", "kind", "taint", "added", "tags", "why", "source"];
@@ -41,7 +45,7 @@ pub struct Added {
     pub created: bool,
     /// What the kind's schema still wants.
     pub missing: Vec<Problem>,
-    /// `docs/<dir>/meta.json`, relative to the vault.
+    /// `docs/<dir>/<dir>.md`, relative to the vault.
     pub meta: PathBuf,
     /// A later add fetched the text an earlier one could not.
     pub text_added: bool,
@@ -102,17 +106,16 @@ pub(crate) fn web_slot(vault: &Vault, url: &str) -> Result<Slot> {
     let canon = canonical_url(url);
     let sha = sha256_bytes(canon.as_bytes())?;
     let id = DocId::web(&canon, &sha).ok_or_else(|| Error::BadRef(url.to_owned()))?;
-    let same = |id: &DocId| {
-        let meta: Value = read_json(&vault.path(&Vault::doc_dir(id).join("meta.json")))?;
-        Ok(meta
-            .get("source")
-            .and_then(Value::as_str)
-            .is_some_and(|u| canonical_url(u) == canon))
-    };
+    let same = |id: &DocId| Ok(source_of(vault, id)?.is_some_and(|u| canonical_url(&u) == canon));
     // The older rule dropped the whole query.
     let rest = host_path(url);
     let legacy = Slug::slugify(rest.split(['?', '#']).next().unwrap_or(rest)).map(DocId::Web);
     slot(vault, legacy, id.clone(), id.hashed(&sha), same)
+}
+
+/// A doc's `source`, as its note says.
+fn source_of(vault: &Vault, id: &DocId) -> Result<Option<String>> {
+    Ok(doc::read(vault, id)?.and_then(|(fm, _)| fm.get("source")?.as_str().map(str::to_owned)))
 }
 
 /// An artifact's slot: the same source means the same bytes in the doc's `file`, or, when
@@ -131,8 +134,7 @@ pub(crate) fn artifact_slot(
         if let Some(held) = vault.read_bytes(&dir.join(file))? {
             return Ok(held == bytes);
         }
-        let meta: Value = read_json(&vault.path(&dir.join("meta.json")))?;
-        Ok(meta.get("source").and_then(Value::as_str) == Some(source))
+        Ok(source_of(vault, id)?.as_deref() == Some(source))
     };
     // The older rule cut long titles without a hash.
     let legacy = Slug::slugify(title).map(DocId::Artifact);
@@ -171,15 +173,23 @@ pub fn add(vault: &Vault, input: &str, opts: &AddOpts) -> Result<Added> {
 /// A paper already in the vault: fetch its text if an earlier add could not.
 fn retry_text(vault: &Vault, aid: &ArxivId) -> Result<Added> {
     let id = DocId::Arxiv(aid.clone());
-    let text = Vault::doc_dir(&id).join("text.md");
-    let mut added = existing(vault, id)?;
-    if vault.path(&text).is_file() {
+    let mut added = existing(vault, id.clone())?;
+    if doc::read(vault, &id)?.is_some_and(|(_, body)| !body.trim().is_empty()) {
         return Ok(added);
     }
     match paper_text(aid) {
         Ok(Some(t)) => {
-            vault.write(&text, &t)?;
-            added.text_added = true;
+            let rel = doc::path(&id);
+            // Under the lock: a reindex filling `builds_on` meanwhile keeps it.
+            added.text_added = vault.update(&rel, |old| {
+                let Some(old) = old else { return Ok(None) };
+                let (fm, body) = note::read(&old, &rel)?;
+                if body.trim().is_empty() {
+                    doc::text(&id, fm, &t).map(Some)
+                } else {
+                    Ok(None)
+                }
+            })?;
         }
         Ok(None) => {}
         Err(e) => added.warnings.push(format!("no text: {e}")),
@@ -251,7 +261,7 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     p.summary = p.summary.or(ax.summary);
     if let Some(found) = pwc {
         let answer = lineage::Answer::of(&id, found);
-        p.lineage = answer.lineage;
+        p.builds_on = answer.lineage.as_deref().map(lineage::builds_on);
         p.venue = answer.venue;
         p.tldr = answer.tldr;
     }
@@ -262,11 +272,7 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     });
     let now = time::now()?;
     let doc = envelope(id, Kind::PAPER, opts, &now, None, p);
-    let mut added = write(
-        vault,
-        &doc,
-        text.as_deref().map(|t| ("text.md", t.as_bytes())),
-    )?;
+    let mut added = write(vault, &doc, text.as_deref().unwrap_or_default(), None)?;
     added.warnings = warnings;
     Ok(added)
 }
@@ -324,7 +330,8 @@ fn add_web(vault: &Vault, url: &str, opts: &AddOpts) -> Result<Added> {
         vault,
         || web_slot(vault, url),
         |id| envelope(id, kind, opts, &now, Some(url.to_owned()), body),
-        ("text.md", text.as_bytes()),
+        text,
+        None,
     )
 }
 
@@ -355,9 +362,9 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
         (text, Fields::new())
     } else {
         let s = String::from_utf8_lossy(&bytes).into_owned();
-        match page::split(&s) {
+        match note::split(&s) {
             Some((yaml, body)) if !html => {
-                let fm = page::parse_yaml(yaml).map_err(|(line, why)| Error::Frontmatter {
+                let fm = note::parse(yaml).map_err(|(line, why)| Error::Frontmatter {
                     path: name.clone().into(),
                     line: line + 1,
                     why,
@@ -385,24 +392,29 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
     };
     let title = if title.is_empty() { stem } else { title };
     let now = time::now()?;
-    let text_file = if html { "index.html" } else { "text.md" };
     let take = |fields: &mut Fields, key: &str| match fields.remove(key) {
         Some(Value::String(s)) if !s.is_empty() => Some(s),
         _ => None,
     };
 
-    // An HTML page is kept byte for byte.
-    let stored = if html { &bytes } else { text.as_bytes() };
+    // An HTML page is kept byte for byte beside an empty note; its text is the index's.
+    let (body, page) = if html {
+        ("", Some((ARTIFACT_FILE, bytes.as_slice())))
+    } else {
+        (text.as_str(), None)
+    };
     if kind == Kind::ARTIFACT {
-        let body = Artifact {
+        let meta = Artifact {
             title: title.clone(),
             captured_at: now.at.clone(),
         };
+        let held = page.map_or(text.as_bytes(), |(_, b)| b);
         return claim(
             vault,
-            || artifact_slot(vault, &title, &name, text_file, stored),
-            |id| envelope(id, kind, opts, &now, Some(name.clone()), body),
-            (text_file, stored),
+            || artifact_slot(vault, &title, &name, ARTIFACT_FILE, held),
+            |id| envelope(id, kind, opts, &now, Some(name.clone()), meta),
+            body,
+            page,
         );
     }
     let id = match kind {
@@ -423,19 +435,16 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
     match kind {
         Kind::MEETING => {
             let attendees = match fields.remove("attendees") {
-                Some(Value::Array(a)) => a
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|s| s.trim_start_matches("[[").trim_end_matches("]]").to_owned())
-                    .collect(),
+                Some(Value::Array(a)) => {
+                    a.iter().filter_map(Value::as_str).map(page_link).collect()
+                }
                 _ => Vec::new(),
             };
-            let body = Meeting {
+            let meta = Meeting {
                 started_at: take(&mut fields, "started_at").unwrap_or_else(|| now.at.clone()),
                 tz: take(&mut fields, "tz").unwrap_or_else(|| now.tz.clone()),
                 place: take(&mut fields, "place").or_else(|| now.place.clone()),
-                project: take(&mut fields, "project")
-                    .map(|p| p.trim_start_matches("[[").trim_end_matches("]]").to_owned()),
+                project: take(&mut fields, "project").as_deref().map(page_link),
                 title: Some(title),
                 attendees,
             };
@@ -447,8 +456,9 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
             }
             write(
                 vault,
-                &envelope(id, kind, opts, &now, source, body),
-                Some((text_file, stored)),
+                &envelope(id, kind, opts, &now, source, meta),
+                body,
+                page,
             )
         }
         _ => {
@@ -456,7 +466,8 @@ fn add_file(vault: &Vault, path: &Path, opts: &AddOpts) -> Result<Added> {
             write(
                 vault,
                 &envelope(id, kind, opts, &now, source, fields),
-                Some((text_file, stored)),
+                body,
+                page,
             )
         }
     }
@@ -482,46 +493,56 @@ fn envelope<B>(
     }
 }
 
-/// Writes the text, then `meta.json`, then reports what the schema still wants. The doc
-/// exists once its meta does, so a crash between the two leaves no half doc.
-fn write<B: Serialize>(vault: &Vault, doc: &Doc<B>, text: Option<(&str, &[u8])>) -> Result<Added> {
-    write_files(vault, doc, text)?;
+/// Writes the doc, then reports what the schema still wants.
+fn write<B: Serialize>(
+    vault: &Vault,
+    doc: &Doc<B>,
+    body: &str,
+    page: Option<(&str, &[u8])>,
+) -> Result<Added> {
+    write_files(vault, doc, body, page)?;
     let mut added = existing(vault, doc.id.clone())?;
     added.created = true;
     Ok(added)
 }
 
+/// The page beside the note first: the doc exists once its note does, so a crash between
+/// the two leaves no half doc.
 fn write_files<B: Serialize>(
     vault: &Vault,
-    doc: &Doc<B>,
-    text: Option<(&str, &[u8])>,
+    d: &Doc<B>,
+    body: &str,
+    page: Option<(&str, &[u8])>,
 ) -> Result<()> {
-    let dir = Vault::doc_dir(&doc.id);
-    if let Some((name, text)) = text {
-        vault.write(&dir.join(name), text)?;
+    if let Some((name, bytes)) = page {
+        vault.write(&Vault::doc_dir(&d.id).join(name), bytes)?;
     }
-    vault.write_json(&dir.join("meta.json"), doc)
+    doc::write(vault, &d.id, doc::fields(d)?, body)
 }
 
 /// Takes the slot `pick` finds and writes the doc there, all under the vault lock, so two
-/// adds never take one id. A held doc missing its text, as an older crash left it, gets it.
+/// adds never take one id. A held doc missing its page, as an older crash left it, gets it.
 fn claim<B: Serialize>(
     vault: &Vault,
     pick: impl FnOnce() -> Result<Slot>,
     doc: impl FnOnce(DocId) -> Doc<B>,
-    (name, text): (&str, &[u8]),
+    body: &str,
+    page: Option<(&str, &[u8])>,
 ) -> Result<Added> {
     let (id, created, text_added) = vault.locked(|| match pick()? {
         Slot::Held(id) => {
+            let Some((name, bytes)) = page else {
+                return Ok((id, false, false));
+            };
             let file = Vault::doc_dir(&id).join(name);
             let missing = !vault.path(&file).is_file();
             if missing {
-                vault.write(&file, text)?;
+                vault.write(&file, bytes)?;
             }
             Ok((id, false, missing))
         }
         Slot::Free(id) => {
-            write_files(vault, &doc(id.clone()), Some((name, text)))?;
+            write_files(vault, &doc(id.clone()), body, page)?;
             Ok((id, true, false))
         }
     })?;
@@ -533,8 +554,12 @@ fn claim<B: Serialize>(
 
 /// A doc already in the vault: validated, not touched.
 fn existing(vault: &Vault, id: DocId) -> Result<Added> {
-    let meta = Vault::doc_dir(&id).join("meta.json");
-    let value: Value = read_json(&vault.path(&meta))?;
+    let meta = doc::path(&id);
+    let (fm, _) = doc::read(vault, &id)?.ok_or_else(|| Error::Invalid {
+        path: meta.clone(),
+        why: "missing".to_owned(),
+    })?;
+    let value = Value::Object(fm);
     let missing = match value.get("kind").and_then(Value::as_str).map(Kind::parse) {
         Some(Ok(kind)) => Schema::compile(kind.as_str(), kind.schema())?.problems(&value),
         _ => vec![Problem::Missing("kind".to_owned())],
@@ -547,6 +572,11 @@ fn existing(vault: &Vault, id: DocId) -> Result<Added> {
         text_added: false,
         warnings: Vec::new(),
     })
+}
+
+/// `[[slug]]`, for a value written as a slug or already as a wikilink.
+pub(crate) fn page_link(s: &str) -> String {
+    note::wikilink(s.trim().trim_start_matches("[[").trim_end_matches("]]"))
 }
 
 /// A web page as markdown via Jina's reader (`r.jina.ai`). `None` when the site
@@ -685,10 +715,10 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         let vault = Vault::open(&dir).unwrap();
         let put = |id: &DocId, url: &str| {
-            let meta = Vault::doc_dir(id).join("meta.json");
-            vault
-                .write_json(&meta, &serde_json::json!({"source": url}))
-                .unwrap();
+            let Value::Object(fm) = serde_json::json!({"source": url}) else {
+                unreachable!()
+            };
+            doc::write(&vault, id, fm, "").unwrap();
         };
         let land = |url: &str| match web_slot(&vault, url).unwrap() {
             Slot::Free(id) => {

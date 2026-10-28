@@ -212,8 +212,6 @@ impl From<DocId> for String {
 pub struct Rel(String);
 
 impl Rel {
-    pub const BUILDS_ON: &str = "builds_on";
-
     pub fn parse(s: &str) -> Result<Self> {
         let ok = (1..=64).contains(&s.len())
             && s.starts_with(|c: char| c.is_ascii_lowercase())

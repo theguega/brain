@@ -28,9 +28,13 @@ pub(crate) enum WikiCmd {
     ///
     /// The reply holds one `=== page: <slug>` line per page, each followed by the page's
     /// full new text. A learn reply may add `=== question: <slug>` blocks: the question the
-    /// corrected page answers, added to eval/questions.jsonl when it is merged. The pages
-    /// are linted against the vault as it would be with them; on errors nothing is
-    /// committed and the exit code is 1. The vault's checkout is never touched.
+    /// corrected page answers, added to eval/questions.jsonl when it is merged. In concept
+    /// and synthesis pages every claim cites a doc by its directory name, `[[arxiv--2410.24164]]`
+    /// or `[[arxiv--2410.24164#Method]]`, and lists its id (`arxiv:2410.24164`) in sources[];
+    /// a typed relation is a frontmatter property of quoted wikilinks
+    /// (`builds_on: ["[[pi0]]"]`). The pages are linted against the vault as it would be
+    /// with them; on errors nothing is committed and the exit code is 1. The vault's
+    /// checkout is never touched.
     Propose {
         /// The doc compiled (`wiki/<doc>`), or `lint` / `learn` (`wiki/<that>-<date>`)
         #[arg(value_parser = Target::parse)]

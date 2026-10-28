@@ -74,7 +74,7 @@ enum Cmd {
         id: String,
         verdict: Verdict,
     },
-    /// Add `rel: b` to page a's frontmatter links
+    /// Add `[[b]]` to page a's `rel` frontmatter property, a typed relation Obsidian draws
     Link {
         /// Page slug: pages/<a>.md
         #[arg(value_parser = Slug::parse)]
@@ -87,10 +87,11 @@ enum Cmd {
     },
     /// Validate every doc and page against its schema, plus the wiki checks; exit 1 on errors
     ///
-    /// Wiki errors: dead [[links]] and [@doc-id] citations, uncited paragraphs or list items
-    /// in concept and synthesis pages outside `## Open questions`, cited ids missing from
-    /// sources[], pages over 1500 tokens. Warnings, on stderr: orphan pages, contradictions
-    /// open over 14 days, active pages not updated in 90 days.
+    /// A doc is cited as [[<doc-dir>]] or [[<doc-dir>#<heading>]], e.g. [[arxiv--2410.24164]].
+    /// Wiki errors: dead [[links]] and citations, uncited paragraphs or list items in concept
+    /// and synthesis pages outside `## Open questions`, cited ids missing from sources[],
+    /// pages over 1500 tokens. Warnings, on stderr: orphan pages, contradictions open over
+    /// 14 days, active pages not updated in 90 days.
     Lint,
     /// Hybrid search over docs, pages, the log and repos: BM25 and vectors, fused
     ///
@@ -327,6 +328,14 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
                 ("taint", json!(got.taint)),
                 ("chunks", json!(got.chunks)),
             ];
+            if !got.links.is_empty() {
+                let links: Vec<String> = got
+                    .links
+                    .iter()
+                    .map(|(rel, dst)| format!("{rel} → {dst}"))
+                    .collect();
+                fields.push(("links", json!(links)));
+            }
             if let Some(span) = &got.span {
                 fields.push(("span", json!(span)));
             }
@@ -446,11 +455,12 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             Reply::Fields(vec![("id", json!(id)), ("verdict", json!(verdict))])
         }
         Cmd::Link { a, b, rel } => {
-            let dst = ingest::resolve(vault, b)
-                .map(|d| d.to_string())
-                .or_else(|_| Slug::parse(b).map(|s| s.to_string()))?;
+            let (dst, target) = match ingest::resolve(vault, b) {
+                Ok(id) => (id.to_string(), id.dir()),
+                Err(_) => Slug::parse(b).map(|s| (s.to_string(), s.to_string()))?,
+            };
             let what = format!("{a} {rel} {dst}");
-            if page::link(vault, a, &dst, rel)? {
+            if page::link(vault, a, &target, rel)? {
                 Reply::Fields(vec![("link", json!(what))])
             } else {
                 Reply::Fields(vec![("noop", json!(format!("{what} already there")))])
@@ -493,6 +503,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
                     ("artifacts", json!(r.artifacts)),
                     ("skips", json!(r.skips)),
                     ("existing", json!(r.existing)),
+                    ("converted", json!(r.converted)),
                 ]),
                 Reply::Table {
                     name: "missing",

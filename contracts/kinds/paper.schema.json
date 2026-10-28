@@ -3,7 +3,7 @@
   "$id": "https://brain.local/contracts/kinds/paper.schema.json",
   "version": 1,
   "title": "C1 doc: paper",
-  "description": "A research paper. Filled by arXiv, the HF Hub (githubRepo, projectPage), alphaXiv and Papers with Code (tldr, lineage). Stored as docs/<id>/meta.json, where the directory name is the id with ':' replaced by '--'.",
+  "description": "A research paper. Filled by arXiv, the HF Hub (githubRepo, projectPage), alphaXiv and Papers with Code (tldr, builds_on). Stored as the YAML frontmatter of docs/<dir>/<dir>.md, whose body is the text; <dir> is the id with ':' replaced by '--'.",
   "type": "object",
   "properties": {
     "id": {
@@ -44,6 +44,14 @@
     "title": {
       "type": "string",
       "minLength": 1
+    },
+    "aliases": {
+      "description": "The title and short handles (π0), so a [[wikilink]] by any of them resolves in Obsidian.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "authors": {
       "type": "array",
@@ -106,31 +114,12 @@
         "minLength": 1
       }
     },
-    "lineage": {
-      "description": "Papers with Code predecessor and successor papers: src builds on dst.",
+    "builds_on": {
+      "description": "Papers with Code predecessor and successor papers, in the library or not. Absent until PwC answers; [] when it knows of none.",
       "type": "array",
       "items": {
-        "type": "object",
-        "properties": {
-          "src": {
-            "type": "string",
-            "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
-          },
-          "dst": {
-            "type": "string",
-            "pattern": "^(arxiv|web|file|meeting|artifact):[a-z0-9][a-z0-9.-]*$"
-          },
-          "rel": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_]*$"
-          }
-        },
-        "required": [
-          "src",
-          "dst",
-          "rel"
-        ],
-        "additionalProperties": false
+        "type": "string",
+        "pattern": "^\\[\\[(arxiv|web|file|meeting|artifact)--[a-z0-9][a-z0-9.-]*\\]\\]$"
       }
     },
     "card": {

@@ -40,11 +40,11 @@ impl Env {
             ("arxiv:2504.16054", "2026-10-21T10:00:00+02:00"),
         ] {
             let dir = id.replace(':', "--");
+            let meta = json!({"id": id, "kind": "paper", "taint": "external", "added": added,
+                    "title": format!("Paper {id}"), "authors": ["A"], "date": "2024-10-31", "links": {}});
             env.write(
-                &format!("docs/{dir}/meta.json"),
-                &json!({"id": id, "kind": "paper", "taint": "external", "added": added,
-                        "title": format!("Paper {id}"), "authors": ["A"], "date": "2024-10-31", "links": {}})
-                .to_string(),
+                &format!("docs/{dir}/{dir}.md"),
+                &format!("---\n{meta}\n---\n"),
             );
         }
         env
@@ -175,7 +175,7 @@ fn a_reply_becomes_a_branch_then_lands_reindexed_and_logged() {
         page(
             "Pi0",
             PI0,
-            "Pi0 puts a flow matching action expert on a VLM backbone [@arxiv:2410.24164#1]."
+            "Pi0 puts a flow matching action expert on a VLM backbone [[arxiv--2410.24164#1]]."
         )
     );
     let out = env.propose(PI0, &reply);
@@ -248,13 +248,13 @@ fn of_two_proposals_on_one_page_the_second_conflicts_and_requeues() {
     let env = Env::new();
     env.write(
         "pages/pi0.md",
-        &page("Pi0", PI0, "A VLA [@arxiv:2410.24164]."),
+        &page("Pi0", PI0, "A VLA [[arxiv--2410.24164]]."),
     );
-    let first = page("Pi0", PI0, "A flow VLA [@arxiv:2410.24164].");
+    let first = page("Pi0", PI0, "A flow VLA [[arxiv--2410.24164]].");
     let second = page(
         "Pi0",
         &format!("{PI0}, {PI05}"),
-        "Superseded by pi0.5 [@arxiv:2504.16054].",
+        "Superseded by pi0.5 [[arxiv--2504.16054]].",
     );
     assert!(
         env.propose(PI0, &format!("=== page: pi0\n{first}"))
@@ -296,14 +296,14 @@ fn an_uncited_paragraph_fails_lint_by_line_and_propose_commits_nothing() {
     let bad = page(
         "Pi0",
         PI0,
-        "A flow VLA [@arxiv:2410.24164].\n\nIt folds laundry.",
+        "A flow VLA [[arxiv--2410.24164]].\n\nIt folds laundry.",
     );
     env.write("pages/pi0.md", &bad);
     let out = env.run(&["lint"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "errors[1/1]{file,error}:\n  pages/pi0.md,line 13: uncited paragraph: cite a doc as [@<doc-id>]\n"
+        "errors[1/1]{file,error}:\n  pages/pi0.md,line 13: uncited paragraph: cite a doc as [[<doc-id>]]\n"
     );
     fs::remove_file(env.vault().join("pages/pi0.md")).unwrap();
 
@@ -320,25 +320,64 @@ fn an_uncited_paragraph_fails_lint_by_line_and_propose_commits_nothing() {
 }
 
 #[test]
+fn a_heading_citation_passes_and_an_uncited_paragraph_fails() {
+    let env = Env::new();
+    let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";
+    let text = fs::read_to_string(env.vault().join(note)).unwrap();
+    env.write(
+        note,
+        &format!("{text}# Method\n\nA flow matching action expert.\n"),
+    );
+    let cited = page(
+        "Pi0",
+        PI0,
+        "Its action expert is a flow matching head [[arxiv--2410.24164#Method]].",
+    )
+    .replace(
+        "---\n# Pi0",
+        "builds_on:\n  - \"[[arxiv--2504.16054]]\"\n---\n# Pi0",
+    );
+    env.write("pages/pi0.md", &cited);
+    let out = env.run(&["lint"]);
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[0/0]{file,error}:\n"
+    );
+    assert!(out.status.success());
+    // A relation property is no unknown key.
+    assert!(!String::from_utf8(out.stderr).unwrap().contains("unknown"));
+
+    env.write("pages/pi0.md", &format!("{cited}\nIt folds laundry.\n"));
+    let out = env.run(&["lint"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "errors[1/1]{file,error}:\n  pages/pi0.md,line 15: uncited paragraph: cite a doc as [[<doc-id>]]\n"
+    );
+}
+
+#[test]
 fn wiki_lint_finds_dead_links_citations_and_unlisted_sources() {
     let env = Env::new();
+    let note = "docs/arxiv--2410.24164/arxiv--2410.24164.md";
+    let text = fs::read_to_string(env.vault().join(note)).unwrap();
     env.write(
-        "docs/arxiv--2410.24164/text.md",
-        "# Method\n\nA flow matching action expert.\n",
+        note,
+        &format!("{text}# Method\n\nA flow matching action expert.\n"),
     );
     env.write(
         "pages/pi0.md",
         &page(
             "Pi0",
             PI0,
-            "See [[nowhere]] [@arxiv:2410.24164].\n\n- From [@arxiv:2504.16054].\n- Dead [@arxiv:1111.11111].\n- No span [@arxiv:2410.24164#999].\n- A heading [@arxiv:2410.24164#method].",
+            "See [[nowhere]] [[arxiv--2410.24164]].\n\n- From [[arxiv--2504.16054]].\n- Dead [[arxiv--1111.11111]].\n- No span [[arxiv--2410.24164#999]].\n- A heading [[arxiv--2410.24164#method]].",
         ),
     );
     let out = env.run(&["lint"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "errors[4/4]{file,error}:\n  pages/pi0.md,line 11: dead link [[nowhere]]\n  pages/pi0.md,line 13: arxiv:2504.16054 is cited but not in sources[]\n  pages/pi0.md,line 14: dead citation [@arxiv:1111.11111]\n  pages/pi0.md,line 15: dead citation [@arxiv:2410.24164#999]: no such span\n"
+        "errors[4/4]{file,error}:\n  pages/pi0.md,line 11: dead link [[nowhere]]\n  pages/pi0.md,line 13: arxiv:2504.16054 is cited but not in sources[]\n  pages/pi0.md,line 14: dead citation [[arxiv--1111.11111]]\n  pages/pi0.md,line 15: dead citation [[arxiv--2410.24164#999]]: no such span\n"
     );
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("warning: pages/pi0.md: orphan"), "{err}");
@@ -361,7 +400,7 @@ fn a_dropped_proposal_puts_its_doc_back_in_the_queue() {
     let env = Env::new();
     let reply = format!(
         "=== page: pi0\n{}",
-        page("Pi0", PI0, "A VLA [@arxiv:2410.24164].")
+        page("Pi0", PI0, "A VLA [[arxiv--2410.24164]].")
     );
     assert!(env.propose(PI0, &reply).status.success());
     assert_eq!(env.queue(), [PI05]);
@@ -393,7 +432,7 @@ fn a_merged_learn_proposal_adds_its_question_to_the_eval_set() {
         page(
             "Pi0",
             PI0,
-            "Its action expert predicts chunks [@arxiv:2410.24164]."
+            "Its action expert predicts chunks [[arxiv--2410.24164]]."
         )
     );
     let out = env.propose("learn", &reply);
@@ -434,13 +473,13 @@ fn pi0_reply(body: &str) -> String {
 fn a_branch_that_touches_anything_but_pages_is_refused() {
     let env = Env::new();
     assert!(
-        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+        env.propose(PI0, &pi0_reply("A VLA [[arxiv--2410.24164]]."))
             .status
             .success()
     );
     // Hand-edit the proposal: delete a doc, replace labels, ignore everything.
     env.git(&["checkout", "-q", "wiki/arxiv--2410.24164"]);
-    env.git(&["rm", "-q", "docs/arxiv--2504.16054/meta.json"]);
+    env.git(&["rm", "-q", "docs/arxiv--2504.16054/arxiv--2504.16054.md"]);
     env.write(".gitignore", "*\n");
     env.git(&["commit", "-qam", "sneak"]);
     env.git(&["checkout", "-q", "-"]);
@@ -453,7 +492,7 @@ fn a_branch_that_touches_anything_but_pages_is_refused() {
     assert!(err.contains("outside pages/"), "{err}");
     assert!(
         env.vault()
-            .join("docs/arxiv--2504.16054/meta.json")
+            .join("docs/arxiv--2504.16054/arxiv--2504.16054.md")
             .is_file()
     );
     assert!(!env.vault().join("pages/pi0.md").exists());
@@ -464,7 +503,7 @@ fn a_branch_that_touches_anything_but_pages_is_refused() {
 fn merged_pages_are_linted_again_against_the_vault_they_land_in() {
     let env = Env::new();
     assert!(
-        env.propose(PI0, &pi0_reply("Then pi0.5 [@arxiv:2504.16054]."))
+        env.propose(PI0, &pi0_reply("Then pi0.5 [[arxiv--2504.16054]]."))
             .status
             .success()
     );
@@ -474,7 +513,7 @@ fn merged_pages_are_linted_again_against_the_vault_they_land_in() {
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("dead citation [@arxiv:2504.16054]"),
+        stdout.contains("dead citation [[arxiv--2504.16054]]"),
         "{stdout}"
     );
     assert!(!env.vault().join("pages/pi0.md").exists());
@@ -488,7 +527,7 @@ fn a_reindex_failure_after_the_merge_is_a_warning_and_the_log_block_stays() {
     fs::create_dir_all(db.parent().unwrap()).unwrap();
     fs::write(&db, "not a database").unwrap();
     assert!(
-        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+        env.propose(PI0, &pi0_reply("A VLA [[arxiv--2410.24164]]."))
             .status
             .success()
     );
@@ -520,7 +559,7 @@ fn a_worktree_left_by_a_killed_propose_is_cleaned_up() {
     ]);
     assert_eq!(env.git(&["worktree", "list"]).lines().count(), 2);
     assert!(
-        env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."))
+        env.propose(PI0, &pi0_reply("A VLA [[arxiv--2410.24164]]."))
             .status
             .success()
     );
@@ -534,7 +573,7 @@ fn the_autosave_never_commits_an_open_merge() {
     env.settle();
     let head = env.git(&["rev-parse", "HEAD"]);
     fs::write(env.vault().join(".git/MERGE_HEAD"), head).unwrap();
-    let out = env.propose(PI0, &pi0_reply("A VLA [@arxiv:2410.24164]."));
+    let out = env.propose(PI0, &pi0_reply("A VLA [[arxiv--2410.24164]]."));
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("a git merge is in progress"), "{err}");
@@ -546,16 +585,16 @@ fn a_conflicting_learn_proposal_is_kept_with_its_question() {
     let env = Env::new();
     env.write(
         "pages/pi0.md",
-        &page("Pi0", PI0, "A VLA [@arxiv:2410.24164]."),
+        &page("Pi0", PI0, "A VLA [[arxiv--2410.24164]]."),
     );
     assert!(
-        env.propose(PI0, &pi0_reply("A flow VLA [@arxiv:2410.24164]."))
+        env.propose(PI0, &pi0_reply("A flow VLA [[arxiv--2410.24164]]."))
             .status
             .success()
     );
     let learn = format!(
         "{}=== question: pi0\nWhat is pi0?\n",
-        pi0_reply("A VLA with an action expert [@arxiv:2410.24164].")
+        pi0_reply("A VLA with an action expert [[arxiv--2410.24164]].")
     );
     let out = env.propose("learn", &learn);
     assert!(

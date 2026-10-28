@@ -8,6 +8,11 @@ rebuilt from those files, one CLI, and one agent skill. brain calls no model.
 - **Files are the truth.** Docs, wiki pages, the log and labels are markdown and JSON in
   `~/brain`. The SQLite index (`~/.cache/brain/index.db`) is a cache: `brain reindex --full`
   rebuilds it.
+- **Obsidian-native.** `~/brain` opens as an Obsidian vault. A doc is one note,
+  `docs/<id>/<id>.md` (`arxiv--2410.24164`), its metadata in the frontmatter. Citations are
+  `[[arxiv--2410.24164#Method]]` wikilinks and typed relations are wikilink-valued
+  properties (`builds_on: ["[[arxiv--2504.16054]]"]`), so the graph view shows the edges
+  agents query.
 - **One front door.** `brain find` searches docs, pages, the log and your repos (BM25 and
   vectors, fused). Bare `brain` prints the 400-token profile a session starts with.
 - **One scheduler.** `brain tick` runs every job that is due, once. A systemd timer calls it
@@ -48,8 +53,8 @@ the steps for a new host and changes nothing.
 
 Library code follows strict lints (no `unwrap`/`expect`/`panic!`, no slice indexing, no
 `unsafe`); see `[lints]` in `Cargo.toml`. Dependencies stay few: clap, rusqlite, serde,
-serde_json, thiserror and a JSON Schema validator; HTTP and git go through the system
-`curl` and `git`.
+serde_json, serde-saphyr (frontmatter YAML), thiserror and a JSON Schema validator; HTTP
+and git go through the system `curl` and `git`.
 
 ```bash
 cargo clippy --all-targets -- -D warnings && cargo test

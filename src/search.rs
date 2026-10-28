@@ -13,7 +13,7 @@ use crate::embed::{self, Embedder};
 use crate::error::{Error, Result, io};
 use crate::id::DocId;
 use crate::index::{Index, missing_vectors, xdg};
-use crate::page;
+use crate::note;
 use crate::vault::Vault;
 
 /// The RRF constant: `score(d) = Σ_r 1/(K + rank_r(d))`.
@@ -352,6 +352,9 @@ pub struct Got {
     pub taint: String,
     /// Chunks in the doc: the numbers a span can name.
     pub chunks: usize,
+    /// Its typed relations, `(rel, dst)`, from wikilink-valued frontmatter; body links are
+    /// in the text.
+    pub links: Vec<(String, String)>,
     pub span: Option<String>,
     /// Fenced when external.
     pub text: String,
@@ -427,6 +430,13 @@ pub fn get(ix: &Index, spec: &str, full: bool) -> Result<Got> {
             spans: format!("1-{}, or a heading: {}", chunks.len(), headings.join(", ")),
         });
     }
+    let mut stmt = ix.conn.prepare(
+        "SELECT rel, dst FROM links WHERE src = ?1 AND rel NOT IN ('cites', 'mentions')
+         ORDER BY rowid",
+    )?;
+    let links = stmt
+        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let external = taint != "own";
     let text = picked.join("\n\n");
     let text = if external { defang(&text) } else { text };
@@ -450,6 +460,7 @@ pub fn get(ix: &Index, spec: &str, full: bool) -> Result<Got> {
         date,
         taint,
         chunks: chunks.len(),
+        links,
         span: span.map(str::to_owned),
         truncated,
     })
@@ -482,7 +493,7 @@ pub fn pages(vault: &Vault, kind: Option<&str>) -> Result<Vec<PageRow>> {
         let text = vault
             .read(&Path::new("pages").join(&name))?
             .unwrap_or_default();
-        let Some(fm) = page::split(&text).and_then(|(y, _)| page::parse_yaml(y).ok()) else {
+        let Some(fm) = note::split(&text).and_then(|(y, _)| note::parse(y).ok()) else {
             continue;
         };
         let get = |k: &str| {

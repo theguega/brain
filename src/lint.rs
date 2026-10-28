@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::contract::{self, Kind, Schema};
 use crate::error::{Result, io};
 use crate::id::DocId;
-use crate::page;
+use crate::note;
 use crate::vault::Vault;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,21 +24,35 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
     let mut schemas: BTreeMap<&str, Schema> = BTreeMap::new();
     for name in entries(vault, "docs")? {
-        let file = Path::new("docs").join(&name).join("meta.json");
+        let file = Path::new("docs").join(&name).join(format!("{name}.md"));
         let mut finding = |error: String| {
             out.push(Finding {
                 file: file.clone(),
                 error,
             })
         };
+        for old in ["meta.json", "text.md"] {
+            if vault
+                .path(&Path::new("docs").join(&name).join(old))
+                .exists()
+            {
+                finding(format!(
+                    "{old} is the old layout: run brain migrate-paperdb to fold it into the note"
+                ));
+            }
+        }
         let Some(raw) = vault.read(&file)? else {
-            finding("no meta.json".to_owned());
+            finding(format!("no {name}.md"));
             continue;
         };
-        let meta: Value = match serde_json::from_str(&raw) {
-            Ok(v) => v,
-            Err(e) => {
-                finding(format!("not JSON: {e}"));
+        let meta = match note::split(&raw).map(|(yaml, _)| note::parse(yaml)) {
+            Some(Ok(fm)) => Value::Object(fm),
+            Some(Err((line, why))) => {
+                finding(format!("line {}: {why}", line + 1));
+                continue;
+            }
+            None => {
+                finding("no frontmatter".to_owned());
                 continue;
             }
         };
@@ -83,11 +97,11 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
             })
         };
         let text = vault.read(&file)?.unwrap_or_default();
-        let Some((yaml, _)) = page::split(&text) else {
+        let Some((yaml, _)) = note::split(&text) else {
             finding("no frontmatter".to_owned());
             continue;
         };
-        match page::parse_yaml(yaml) {
+        match note::parse(yaml) {
             Ok(fm) => {
                 for p in pages.problems(&Value::Object(fm)) {
                     finding(p.to_string());
