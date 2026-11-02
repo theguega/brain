@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Install brain on this machine to run on the host: the `brain` command and the agent skill.
+#   brain-install myserver
+# BRAIN_SRC is this repo's path in the host's home; the client takes brain-ssh from there.
+set -euo pipefail
+
+host=${1:?usage: brain-install <ssh-host>}
+src=${BRAIN_SRC:-Developer/brain}
+bin="$HOME/.local/bin"
+skill="$HOME/.agents/skills/brain"
+
+# Checked first, so a host without brain on its non-interactive PATH changes nothing here.
+ssh -T "$host" 'command -v brain' >/dev/null || {
+  echo "error: no brain on the PATH of $host"
+  echo "next: put brain on the non-interactive PATH of $host, then rerun"
+  exit 1
+}
+
+# set -e does not stop on a failed command before &&, so each fetch reports its own failure.
+# The file is replaced only after its fetch succeeds, so a failed one keeps the working copy.
+fetch() { # fetch <mode> <dest> <command...>
+  if "${@:3}" >"$2.new" && chmod "$1" "$2.new" && mv "$2.new" "$2"; then
+    return
+  fi
+  rm -f "$2.new"
+  echo "error: could not fetch $2"
+  echo "next: check ssh to $host, then rerun brain-install $host"
+  exit 1
+}
+
+mkdir -p "$bin" "$skill"
+fetch 755 "$bin/brain" ssh -T "$host" "cat $src/bin/brain-ssh"
+fetch 644 "$skill/SKILL.md" env BRAIN_HOST="$host" "$bin/brain" --skill
+
+# Claude Code reads its skills from ~/.claude/skills; link them to the shared copy when unset.
+[[ -e "$HOME/.claude/skills/brain" ]] || {
+  mkdir -p "$HOME/.claude/skills"
+  ln -s "$skill" "$HOME/.claude/skills/brain"
+}
+
+BRAIN_HOST=$host "$bin/brain" >/dev/null
+echo "brain installed for $host: $bin/brain, $skill/SKILL.md"
