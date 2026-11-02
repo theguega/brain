@@ -150,6 +150,13 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// A vault dir `Vault::open` accepts, without `open_or_create`'s initial commit: that
+    /// needs a git identity, which CI does not have and a unit test must not set globally.
+    fn vault(dir: &std::path::Path) -> Vault {
+        std::fs::create_dir_all(dir.join(".git")).expect("a vault dir");
+        Vault::open(dir).expect("a vault with .git")
+    }
+
     fn paper(vault: &Vault, aid: &str) -> DocId {
         let id = DocId::Arxiv(ArxivId::parse(aid).unwrap());
         let fm = crate::note::parse(&format!(
@@ -167,7 +174,7 @@ mod tests {
     fn a_paper_the_hub_knows_nothing_about_is_written_once_and_let_go() {
         let d = std::env::temp_dir().join(format!("brain-enrich-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let vault = Vault::open_or_create(&d).unwrap();
+        let vault = vault(&d);
         let id = paper(&vault, "2501.00001");
         let db = d.join("index.db");
         Index::open(&db).unwrap();
@@ -192,7 +199,7 @@ mod tests {
     fn one_round_stops_at_the_limit_and_keeps_the_rest_pending() {
         let d = std::env::temp_dir().join(format!("brain-enrich-lim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let vault = Vault::open_or_create(&d).unwrap();
+        let vault = vault(&d);
         for i in 1..=5 {
             paper(&vault, &format!("2501.0000{i}"));
         }
@@ -213,7 +220,7 @@ mod tests {
     fn a_populated_block_lands_in_the_note() {
         let d = std::env::temp_dir().join(format!("brain-enrich-full-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let vault = Vault::open_or_create(&d).unwrap();
+        let vault = vault(&d);
         let id = paper(&vault, "2410.24164");
         let db = d.join("index.db");
         Index::open(&db).unwrap();
