@@ -7,8 +7,8 @@
 
 use brain::contract::{self, JobLine, Kind, Problem, Profile, Repo, Schema};
 use brain::doc::{
-    Artifact, Card, Doc, Family, Fields, Hub, HubCounts, Meeting, Paper, PaperLinks, Tag, Taint,
-    Web,
+    Artifact, Card, Doc, Family, Fields, Hub, HubCounts, Meeting, Outline, Paper, PaperLinks, Tag,
+    Taint, Web,
 };
 use brain::label::{Label, Verdict};
 use brain::log::Entry;
@@ -143,6 +143,13 @@ fn c1_doc_types_match_their_schemas() {
             },
             upvotes: Some(31),
             stars: Some(14491),
+        }),
+        axiv: Some(Outline {
+            problem: vec!["Data scarcity.".to_owned()],
+            solution: vec!["Flow matching on a VLM.".to_owned()],
+            insights: Vec::new(),
+            results: Vec::new(),
+            topics: vec!["cs.RO".to_owned()],
         }),
     };
     let paper = doc("arxiv:2410.24164", Kind::PAPER, paper);

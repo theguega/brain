@@ -260,6 +260,11 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
     p.links.code = p.links.code.or(ax.code).or(comment_code);
     p.links.project = p.links.project.or(comment_project);
     p.summary = p.summary.or(ax.summary);
+    // The outline is a model's reading aid, so it stays its own block rather than the prose
+    // `summary` an agent might quote as the paper's own words.
+    if !ax.outline.is_empty() {
+        p.axiv = Some(ax.outline);
+    }
     let mut successors = Vec::new();
     if let Some(found) = pwc {
         let answer = lineage::Answer::of(&id, found);

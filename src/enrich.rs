@@ -13,12 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{OptionalExtension as _, params};
 
-use crate::doc::{self, Hub};
+use crate::doc;
 use crate::error::Result;
 use crate::id::{ArxivId, DocId};
 use crate::index::Index;
 use crate::vault::Vault;
-use crate::{hub, lineage, note};
+use crate::{alphaxiv, hub, lineage, note};
 
 /// Papers refetched per tick. At one tick per 15 minutes this clears a large vault in a day
 /// without coming near the Hub's 500-per-5-minutes bucket.
@@ -35,20 +35,26 @@ pub struct Filled {
     pub warning: Option<String>,
 }
 
-/// Refetches the Hub record for at most `limit` papers that have no `hub:` key.
-/// The first Hub failure ends the round: the rest would fail the same way.
-pub fn retry(
+/// Refetches one enrichment for at most `limit` papers that lack `key` in their frontmatter.
+/// `fill` turns a fetched record into the frontmatter value to store; `what` names the source
+/// in the warning. The first failure ends the round: the rest would fail the same way.
+pub fn retry<T>(
     vault: &Vault,
     index: &Path,
+    key: &str,
+    what: &str,
     limit: usize,
-    lookup: &dyn Fn(&ArxivId) -> Result<Option<hub::Info>>,
+    fetch: &dyn Fn(&ArxivId) -> Result<Option<T>>,
+    fill: impl Fn(&T) -> serde_json::Value,
 ) -> Result<Filled> {
-    // A note with no block because the Hub simply knows nothing about the paper would be
-    // refetched forever. The block records what the Hub said, including "nothing": an empty
-    // `hub: {}` is written once and ends the retry.
+    // A note with no block because the source simply knows nothing would be refetched forever.
+    // The block records what the source said, including "nothing": an empty `key: {}` is
+    // written once and ends the retry.
     let ix = Index::open(index)?;
     ix.conn.execute(
-        "CREATE TABLE IF NOT EXISTS hub_tries (id TEXT PRIMARY KEY, at INTEGER NOT NULL)",
+        &format!(
+            "CREATE TABLE IF NOT EXISTS {key}_tries (id TEXT PRIMARY KEY, at INTEGER NOT NULL)"
+        ),
         [],
     )?;
     let now = SystemTime::now()
@@ -56,7 +62,7 @@ pub fn retry(
         .map_or(0, |i| i64::try_from(i.as_secs()).unwrap_or(i64::MAX));
     let mut out = Filled::default();
     let mut tries = 0;
-    for (id, aid) in lineage::papers_without(vault, "hub")? {
+    for (id, aid) in lineage::papers_without(vault, key)? {
         out.pending += 1;
         if tries == limit || out.warning.is_some() {
             continue;
@@ -64,7 +70,7 @@ pub fn retry(
         let last: Option<i64> = ix
             .conn
             .query_row(
-                "SELECT at FROM hub_tries WHERE id = ?1",
+                &format!("SELECT at FROM {key}_tries WHERE id = ?1"),
                 [id.to_string()],
                 |r| r.get(0),
             )
@@ -74,40 +80,69 @@ pub fn retry(
         }
         tries += 1;
         ix.conn.execute(
-            "INSERT OR REPLACE INTO hub_tries VALUES (?1, ?2)",
+            &format!("INSERT OR REPLACE INTO {key}_tries VALUES (?1, ?2)"),
             params![id.to_string(), now],
         )?;
-        match lookup(&aid) {
-            Ok(info) => {
-                let block = info.as_ref().and_then(hub::Info::block).unwrap_or_default();
-                write(vault, &id, &block)?;
+        match fetch(&aid) {
+            Ok(found) => {
+                let value = found
+                    .as_ref()
+                    .map_or_else(|| serde_json::Value::Object(serde_json::Map::new()), &fill);
+                write(vault, &id, key, value)?;
                 out.filled += 1;
                 out.pending -= 1;
             }
-            Err(e) => out.warning = Some(format!("hugging face hub: {e}")),
+            Err(e) => out.warning = Some(format!("{what}: {e}")),
         }
     }
     Ok(out)
 }
 
-/// Sets `hub:` on the note, or `hub: {}` when the Hub had nothing. `false` if it could not.
-fn write(vault: &Vault, id: &DocId, block: &Hub) -> Result<bool> {
+/// Sets `key` on the note, `false` if it is already there. Under the vault lock, as reindex
+/// may be filling the same note.
+fn write(vault: &Vault, id: &DocId, key: &str, value: serde_json::Value) -> Result<bool> {
     let rel = doc::path(id);
     vault.update(&rel, |old| {
         let Some(old) = old else { return Ok(None) };
         let (mut fm, body) = note::read(&old, &rel)?;
-        if fm.contains_key("hub") {
+        if fm.contains_key(key) {
             return Ok(None);
         }
-        fm.insert(
-            "hub".to_owned(),
-            serde_json::to_value(block).map_err(|source| crate::Error::Decode {
-                what: "hub block",
-                source,
-            })?,
-        );
+        fm.insert(key.to_owned(), value.clone());
         doc::text(id, fm, &body).map(Some)
     })
+}
+
+/// A record's block as a frontmatter value.
+fn block<T: serde::Serialize>(record: &T) -> serde_json::Value {
+    serde_json::to_value(record)
+        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
+}
+
+/// The Hub's `hub:` block.
+pub fn hub(vault: &Vault, index: &Path, limit: usize) -> Result<Filled> {
+    retry(
+        vault,
+        index,
+        "hub",
+        "hugging face hub",
+        limit,
+        &|aid| hub::info(aid).map(|i| i.and_then(|i| i.block())),
+        block,
+    )
+}
+
+/// alphaXiv's `axiv:` block.
+pub fn axiv(vault: &Vault, index: &Path, limit: usize) -> Result<Filled> {
+    retry(
+        vault,
+        index,
+        "axiv",
+        "alphaxiv",
+        limit,
+        &|aid| alphaxiv::info(aid).map(|i| i.map(|i| i.outline).filter(|o| !o.is_empty())),
+        block,
+    )
 }
 
 #[cfg(test)]
@@ -137,17 +172,17 @@ mod tests {
         let db = d.join("index.db");
         Index::open(&db).unwrap();
         let calls = RefCell::new(0);
-        let lookup = |_: &ArxivId| {
+        let lookup = |_: &ArxivId| -> Result<Option<crate::doc::Hub>> {
             *calls.borrow_mut() += 1;
             Ok(None)
         };
 
-        let first = retry(&vault, &db, PER_TICK, &lookup).unwrap();
+        let first = retry(&vault, &db, "hub", "hub", PER_TICK, &lookup, block).unwrap();
         assert_eq!(first.filled, 1, "the block is written even when empty");
         // The note now carries `hub: {}`, so the next pass has nothing to do.
         let (fm, _) = doc::read(&vault, &id).unwrap().unwrap();
         assert!(fm.contains_key("hub"));
-        let second = retry(&vault, &db, PER_TICK, &lookup).unwrap();
+        let second = retry(&vault, &db, "hub", "hub", PER_TICK, &lookup, block).unwrap();
         assert_eq!(second.pending, 0);
         assert_eq!(*calls.borrow(), 1, "not asked twice");
         let _ = std::fs::remove_dir_all(&d);
@@ -164,13 +199,40 @@ mod tests {
         let db = d.join("index.db");
         Index::open(&db).unwrap();
         let calls = RefCell::new(0);
-        let lookup = |_: &ArxivId| {
+        let lookup = |_: &ArxivId| -> Result<Option<crate::doc::Hub>> {
             *calls.borrow_mut() += 1;
             Ok(None)
         };
-        let out = retry(&vault, &db, 2, &lookup).unwrap();
+        let out = retry(&vault, &db, "hub", "hub", 2, &lookup, block).unwrap();
         assert_eq!(*calls.borrow(), 2, "budgeted");
         assert_eq!(out.pending, 3, "the other three wait for the next tick");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_populated_block_lands_in_the_note() {
+        let d = std::env::temp_dir().join(format!("brain-enrich-full-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let vault = Vault::open_or_create(&d).unwrap();
+        let id = paper(&vault, "2410.24164");
+        let db = d.join("index.db");
+        Index::open(&db).unwrap();
+        let lookup = |_: &ArxivId| {
+            Ok(Some(crate::doc::Hub {
+                models: vec!["lerobot/pi0_old".to_owned()],
+                counts: crate::doc::HubCounts {
+                    models: 114,
+                    ..crate::doc::HubCounts::default()
+                },
+                upvotes: Some(31),
+                ..crate::doc::Hub::default()
+            }))
+        };
+        retry(&vault, &db, "hub", "hub", PER_TICK, &lookup, block).unwrap();
+        let (fm, body) = doc::read(&vault, &id).unwrap().unwrap();
+        assert_eq!(fm["hub"]["counts"]["models"], 114);
+        assert_eq!(fm["hub"]["models"][0], "lerobot/pi0_old");
+        assert_eq!(body, "body", "the text is left alone");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

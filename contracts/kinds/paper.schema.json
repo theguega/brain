@@ -329,6 +329,49 @@
         }
       },
       "additionalProperties": false
+    },
+    "axiv": {
+      "description": "alphaXiv's auto-generated outline and filing. Another model's summary, not the authors' words: a reading aid, never a citation, and no claim from it should be repeated without checking the text.",
+      "type": "object",
+      "properties": {
+        "problem": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "solution": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "insights": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "topics": {
+          "description": "alphaXiv's categories, e.g. cs.RO. Not the user's tags.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::index::{self, Index};
 use crate::time::{self, Now};
 use crate::vault::{Vault, git, read_json, write_atomic};
-use crate::{enrich, eval, gpu, hub, lineage, profile, pwc, repos, state};
+use crate::{enrich, eval, gpu, lineage, profile, pwc, repos, state};
 
 const STATE: &str = "tick.json";
 const LOCK: &str = "tick.lock";
@@ -257,10 +257,17 @@ impl Ctx<'_> {
                     if let Some(w) = tried.warning {
                         eprintln!("warning: {w}");
                     }
-                    // Same cadence for notes that predate the `hub:` block add now writes.
-                    let filled = enrich::retry(self.vault, &self.db, enrich::PER_TICK, &hub::info)?;
-                    if let Some(w) = filled.warning {
-                        eprintln!("warning: {w}");
+                    // Same cadence for notes that predate the blocks add now writes.
+                    for (key, filled) in [
+                        ("hub", enrich::hub(self.vault, &self.db, enrich::PER_TICK)?),
+                        (
+                            "axiv",
+                            enrich::axiv(self.vault, &self.db, enrich::PER_TICK)?,
+                        ),
+                    ] {
+                        if let Some(w) = filled.warning {
+                            eprintln!("warning: {key}: {w}");
+                        }
                     }
                 }
                 let c = index::reindex_text(self.vault, &self.db, &self.embedder)?;

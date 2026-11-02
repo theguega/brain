@@ -103,6 +103,38 @@ pub struct Paper {
     /// (extracted from its text). Absent when the Hub has nothing to say.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hub: Option<Hub>,
+    /// alphaXiv's auto-generated outline. A model wrote it, not the authors: read it as a
+    /// reading aid, never cite it, and check the text before repeating a claim from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axiv: Option<Outline>,
+}
+
+/// alphaXiv's AI outline and filing. Distinct from `abstract` (the authors' words) and from
+/// `card` (an agent's extraction, which cites the text); this is another model's summary.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Outline {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problem: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub solution: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub insights: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<String>,
+}
+
+impl Outline {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.problem.is_empty()
+            && self.solution.is_empty()
+            && self.insights.is_empty()
+            && self.results.is_empty()
+            && self.topics.is_empty()
+    }
 }
 
 /// A paper's Hugging Face footprint. The Hub lists only the top few artifacts of each kind,
