@@ -1,4 +1,4 @@
-//! S6: GPU jobs skip their run while training holds the GPU.
+//! GPU jobs skip their run while training holds the GPU.
 
 use std::collections::BTreeMap;
 use std::process::Command;

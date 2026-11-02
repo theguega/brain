@@ -1,4 +1,4 @@
-//! The read side: `find` (B3), `get` (B4), `pages` (B17), with external text fenced (B5).
+//! The read side: `find`, `get`, `pages`, with external text fenced.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -18,7 +18,7 @@ use crate::vault::Vault;
 
 /// The RRF constant: `score(d) = Σ_r 1/(K + rank_r(d))`.
 const K: f64 = 60.0;
-/// paperdb's title weight on the heading column (which holds the title), body weight on text.
+/// Title weight on the heading column (which holds the title), body weight on text.
 const BM25: &str = "bm25(chunks_fts, 8.0, 1.0)";
 const BM25_DEPTH: i64 = 1000;
 const VECTOR_DEPTH: usize = 100;
@@ -321,13 +321,13 @@ fn defang(s: &str) -> String {
     s.replace(CLOSE, "> > >").replace("<<<", "< < <")
 }
 
-/// Fenced on lines of their own, so no line of external text is ever bare (B5).
+/// Fenced on lines of their own, so no line of external text is ever bare.
 #[must_use]
 pub fn fence(text: &str) -> String {
     format!("{OPEN}\n{}\n{CLOSE}", defang(text))
 }
 
-/// Appends `{q, at, ids}` to `$XDG_STATE_HOME/brain/queries.jsonl`: the eval's candidates (B8).
+/// Appends `{q, at, ids}` to `$XDG_STATE_HOME/brain/queries.jsonl`: the eval's candidates.
 pub fn log_query(q: &str, ids: &[&str]) -> Result<()> {
     let dir = xdg("XDG_STATE_HOME", ".local/state")?.join("brain");
     io(std::fs::create_dir_all(&dir), &dir)?;

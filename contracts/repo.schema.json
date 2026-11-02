@@ -3,7 +3,7 @@
   "$id": "https://brain.local/contracts/repo.schema.json",
   "version": 1,
   "title": "C13 repo",
-  "description": "A registered git checkout. path is relative to the home directory (B16).",
+  "description": "A registered git checkout. path is relative to the home directory.",
   "type": "object",
   "properties": {
     "name": {

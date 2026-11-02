@@ -2,7 +2,7 @@
 //! card; code is read live by `brain code`.
 //!
 //! ```toml
-//! roots = ["~/Developer"]          # under the home directory, never absolute (B16)
+//! roots = ["~/Developer"]          # under the home directory, never absolute
 //! include = ["*"]                  # globs on the path below a root; `*`, `**`, `?`
 //! exclude = ["archive/**"]
 //! ```
@@ -650,8 +650,8 @@ mod tests {
         assert!(glob("archive/**", "archive/old/x"));
         assert!(glob("**/x", "a/b/x"));
         assert!(glob("**/x", "x"));
-        assert!(glob("op?lin*", "opalin-job"));
-        assert!(!glob("opalin", "opalin2"));
+        assert!(glob("rob?t*", "robot-job"));
+        assert!(!glob("robot", "robot2"));
     }
 
     #[test]

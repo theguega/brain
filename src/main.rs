@@ -14,10 +14,7 @@ use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{
-    Error, Rel, Result, Slug, Vault, hal, lineage, lint, migrate_paperdb, page, pwc, time, vault,
-    wiki,
-};
+use brain::{Error, Rel, Result, Slug, Vault, lineage, lint, page, pwc, time, vault, wiki};
 
 mod wiki_cli;
 
@@ -156,20 +153,6 @@ enum Cmd {
         /// Rebuild from nothing
         #[arg(long)]
         full: bool,
-    },
-    /// Copy a paperdb library, the drover journal and a readings directory into the vault
-    ///
-    /// Sources are only read. Running it again changes nothing. Prints what was written,
-    /// then `missing[n]{id,missing}`: the required book metadata no file provided.
-    MigratePaperdb {
-        /// The paperdb library: papers/<id>/, .cache/pdf/, inbox.jsonl
-        papers: PathBuf,
-        /// drover's journal.db, opened read-only
-        #[arg(long, value_name = "DB")]
-        journal: Option<PathBuf>,
-        /// A directory of pdf, epub and html books
-        #[arg(long, value_name = "DIR")]
-        readings: Option<PathBuf>,
     },
     #[command(flatten)]
     Ops(ops::Ops),
@@ -478,64 +461,6 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
             } else {
                 Reply::Fields(vec![("noop", json!(format!("{what} already there")))])
             }
-        }
-        Cmd::MigratePaperdb {
-            papers,
-            journal,
-            readings,
-        } => {
-            let src = migrate_paperdb::Sources {
-                papers,
-                journal: journal.as_deref(),
-                readings: readings.as_deref(),
-            };
-            let net = migrate_paperdb::Lookups {
-                pwc: &pwc::paper,
-                hal: &hal::record,
-            };
-            let r = migrate_paperdb::run(vault, &src, &index::pdf_dir()?, &time::now()?, net);
-            for w in &r.warnings {
-                eprintln!("warning: {w}");
-            }
-            for f in &r.failed {
-                eprintln!("failed: {f}");
-            }
-            let rows: Vec<Vec<Value>> = r
-                .missing
-                .iter()
-                .map(|(id, m)| vec![json!(id), json!(m.join(" "))])
-                .collect();
-            let reply = Reply::Many(vec![
-                Reply::Fields(vec![
-                    ("papers", json!(r.papers)),
-                    ("blogs", json!(r.blogs)),
-                    ("pdfs", json!(r.pdfs)),
-                    ("lineage", json!(r.lineage)),
-                    ("journal", json!(r.journal)),
-                    ("books", json!(r.books)),
-                    ("artifacts", json!(r.artifacts)),
-                    ("skips", json!(r.skips)),
-                    ("existing", json!(r.existing)),
-                    ("converted", json!(r.converted)),
-                ]),
-                Reply::Table {
-                    name: "missing",
-                    cols: &["id", "missing"],
-                    total: rows.len().to_string(),
-                    rows,
-                },
-            ]);
-            if !r.failed.is_empty() {
-                print(&render(&reply, false));
-                return Err(Error::Invalid {
-                    path: papers.clone(),
-                    why: format!(
-                        "{} entries, rows or files not migrated (each printed as failed:)",
-                        r.failed.len()
-                    ),
-                });
-            }
-            reply
         }
         Cmd::Lint => return run_lint(vault),
         Cmd::Find { .. }

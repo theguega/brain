@@ -1,4 +1,4 @@
-//! Vectors (B12): a local OpenAI-compatible `/v1/embeddings` server, stored as f16.
+//! Vectors: a local OpenAI-compatible `/v1/embeddings` server, stored as f16.
 //!
 //! `BRAIN_EMBED_URL` (default [`DEFAULT_URL`]) and `BRAIN_EMBED_MODEL` (default
 //! [`DEFAULT_MODEL`]) pick the server and model; `BRAIN_EMBED_TIMEOUT` is the seconds a

@@ -1,4 +1,4 @@
-//! B8: `eval/questions.jsonl` holds `{q, expect: [id…]}`. Each question goes through `find`,
+//! `eval/questions.jsonl` holds `{q, expect: [id…]}`. Each question goes through `find`,
 //! and the run is scored on recall@8 and on the output tokens per hit.
 //!
 //! `find` is called directly, so an eval run never lands in `queries.jsonl` as a real query.

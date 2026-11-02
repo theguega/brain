@@ -299,7 +299,7 @@ fn other_contract_types_match_their_schemas() {
     };
     assert!(
         !problems("repo", contract::REPO, &bad).is_empty(),
-        "absolute paths are rejected (B16)"
+        "absolute paths are rejected"
     );
     let ctx = Context {
         tz: "Asia/Tokyo".to_owned(),

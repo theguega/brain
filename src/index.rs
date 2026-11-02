@@ -1,5 +1,5 @@
 //! `~/.cache/brain/index.db`: chunks, FTS5, vectors and links, rebuilt from the vault
-//! and the registered repos alone (B1). Files win: whatever the index says, `reindex`
+//! and the registered repos alone. Files win: whatever the index says, `reindex`
 //! makes it match them again.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,11 +94,6 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("brain/index.db"))
 }
 
-/// `$XDG_CACHE_HOME/brain/pdf`: paper PDFs, a cache since arXiv can serve them again.
-pub fn pdf_dir() -> Result<PathBuf> {
-    Ok(xdg("XDG_CACHE_HOME", ".cache")?.join("brain/pdf"))
-}
-
 /// `$<var>`, else `~/<fallback>`.
 pub(crate) fn xdg(var: &str, fallback: &str) -> Result<PathBuf> {
     match std::env::var_os(var) {
@@ -180,7 +175,7 @@ pub fn reindex(vault: &Vault, path: &Path, full: bool, embedder: &Embedder) -> R
     sync(vault, path, full, embedder, true)
 }
 
-/// [`reindex`] without the embedder: `brain tick` fills vectors as its own job (S6).
+/// [`reindex`] without the embedder: `brain tick` fills vectors as its own job.
 pub fn reindex_text(vault: &Vault, path: &Path, embedder: &Embedder) -> Result<Counts> {
     sync(vault, path, false, embedder, false)
 }
@@ -618,7 +613,7 @@ fn doc_source(vault: &Vault, names: &Names, dir: &str) -> Result<Source> {
     let meta = Value::Object(fm);
     let kind = str_of(&meta, "kind").unwrap_or("note").to_owned();
     // From the kind and id, never the frontmatter: an edited `taint: own` must not unfence
-    // a paper (B5). `brain lint` reports the edit.
+    // a paper. `brain lint` reports the edit.
     let taint = Kind::parse(&kind).map_or(Taint::External, |k| Taint::of(k, &id));
     let date = ["date", "started_at", "captured_at", "added"]
         .iter()

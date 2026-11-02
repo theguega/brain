@@ -1,4 +1,4 @@
-//! A tokenizer approximation, so a token budget (C5, B8) is counted without a model's
+//! A tokenizer approximation, so a token budget (C5) is counted without a model's
 //! vocabulary: an ASCII word costs a token per 4 chars, any other visible char one.
 
 #[must_use]

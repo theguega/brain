@@ -1,4 +1,4 @@
-//! `brain add` (B2, B13, B14): a source becomes the note `docs/<dir>/<dir>.md`, with an
+//! `brain add`: a source becomes the note `docs/<dir>/<dir>.md`, with an
 //! artifact's `index.html` beside it. Idempotent: a source already in the vault is left
 //! untouched.
 
@@ -631,11 +631,6 @@ pub fn pdf_to_text(pdf: &Path) -> Result<String, String> {
         "no PDF converter worked (install uv or poppler): {}",
         errors.join("; ")
     ))
-}
-
-/// Hex SHA-256 of a file.
-pub(crate) fn sha256(path: &Path) -> Result<String> {
-    sha256_bytes(&io(std::fs::read(path), path)?)
 }
 
 /// Hex SHA-256, by coreutils `sha256sum` or macOS `shasum` on stdin.

@@ -1,4 +1,4 @@
-//! `brain lint`, wiki part (B18): deterministic checks on `pages/*.md` beyond the schema.
+//! `brain lint`, wiki part: deterministic checks on `pages/*.md` beyond the schema.
 //!
 //! A wikilink resolves as Obsidian does (see [`Names`]): a doc's directory name, a page's
 //! slug, then an alias. One that names a doc, `[[arxiv--2410.24164#Method]]` or

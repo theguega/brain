@@ -1,4 +1,4 @@
-//! `brain lint`, schema part (B9): every doc and page against its contract.
+//! `brain lint`, schema part: every doc and page against its contract.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -32,25 +32,6 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
                 error,
             })
         };
-        let has_note = vault.path(&file).is_file();
-        for old in ["meta.json", "text.md"] {
-            if vault
-                .path(&Path::new("docs").join(&name).join(old))
-                .exists()
-            {
-                finding(if has_note {
-                    format!(
-                        "{old} beside the note: brain migrate-paperdb finishes a fold it \
-                         matches; if it does not, an older brain wrote it: merge what you \
-                         want into {name}.md and delete {old}"
-                    )
-                } else {
-                    format!(
-                        "{old} is the old layout: run brain migrate-paperdb to fold it into the note"
-                    )
-                });
-            }
-        }
         let Some(raw) = vault.read(&file)? else {
             finding(format!("no {name}.md"));
             continue;
@@ -92,7 +73,7 @@ pub fn lint(vault: &Vault) -> Result<Vec<Finding>> {
         for p in schema.problems(&meta) {
             finding(p.to_string());
         }
-        // Set by brain from the kind and id; an edit would unfence external text (B5).
+        // Set by brain from the kind and id; an edit would unfence external text.
         if let Some(id) = &dir_id {
             let want = Taint::of(kind, id);
             if serde_json::to_value(want).ok().as_ref() != meta.get("taint") {

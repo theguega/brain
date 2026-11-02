@@ -149,7 +149,7 @@ pub struct JobLine {
     pub err: Option<String>,
 }
 
-/// C13: a registered repo. `path` is relative to the home directory (B16).
+/// C13: a registered repo. `path` is relative to the home directory.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repo {
     pub name: String,

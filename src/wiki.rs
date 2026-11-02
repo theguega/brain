@@ -1,4 +1,4 @@
-//! The wiki's review loop (B17–B19). A run's reply becomes a `wiki/*` branch of the vault,
+//! The wiki's review loop. A run's reply becomes a `wiki/*` branch of the vault,
 //! built in a temporary worktree under the cache so the vault's checkout is never touched,
 //! and lands on the vault's branch only through [`merge`].
 //!

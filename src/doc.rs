@@ -25,14 +25,14 @@ pub struct Doc<B> {
     pub tags: Vec<Tag>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
-    /// File name or URL it came from; never an absolute path (B16).
+    /// File name or URL it came from; never an absolute path.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(flatten)]
     pub body: B,
 }
 
-/// Anything from outside is printed fenced, so an injected instruction is never a bare line (B5).
+/// Anything from outside is printed fenced, so an injected instruction is never a bare line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Taint {
@@ -181,8 +181,8 @@ pub fn fields<B: Serialize>(doc: &Doc<B>) -> Result<Fields> {
     }
 }
 
-/// The note text. Without `aliases`, they are the title and a single keyword: paperdb kept
-/// a paper's short name (π0) as its only keyword, and HF keyword lists are topics, not names.
+/// The note text. Without `aliases`, they are the title and a single keyword: a lone keyword
+/// is a short name (π0), while longer keyword lists are topics, not names.
 pub fn text(id: &DocId, mut fm: Fields, body: &str) -> Result<String> {
     if !fm.contains_key("aliases") {
         let title = fm.get("title").and_then(Value::as_str);

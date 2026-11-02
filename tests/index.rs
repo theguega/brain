@@ -305,8 +305,8 @@ fn fixture(env: &Env) {
          Policies predict a chunk of future actions [[arxiv--2410.24164#Method]]. See [[demo]].\n",
     );
     env.write(
-        "pages/theo.md",
-        "---\nkind: person\ntitle: Theo\nsummary: Founding engineer, embodied AI\nstatus: active\nsources: []\nupdated: 2026-10-01\n---\nWorks on robots.\n",
+        "pages/alice.md",
+        "---\nkind: person\ntitle: Alice\nsummary: Robotics engineer, embodied AI\nstatus: active\nsources: []\nupdated: 2026-10-01\n---\nWorks on robots.\n",
     );
     env.write(
         "log/2026-10-23.md",

@@ -1,4 +1,4 @@
-//! B20: `brain tick`, run every 15 minutes by one systemd timer, is the only scheduler.
+//! `brain tick`, run every 15 minutes by one systemd timer, is the only scheduler.
 //! Each job has a kind (cron, lazy, event) and a cheap `due` test; only due jobs run.
 //!
 //! This step runs the jobs of this crate. Model jobs wait for drover v2 and the jobs of
@@ -269,7 +269,7 @@ impl Ctx<'_> {
                     return Ok(Done::Skipped("gpu busy"));
                 }
                 match index::embed(&self.db, &self.embedder, EMBED_BUDGET)? {
-                    // B12: no embedder is a degraded mode, not an error; the chunks stay due.
+                    // No embedder is a degraded mode, not an error; the chunks stay due.
                     (_, Some(Error::Network { .. })) => return Ok(Done::Skipped("embedder down")),
                     (_, Some(e)) => return Err(e),
                     _ => {}

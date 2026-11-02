@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run brain on BRAIN_HOST, which holds the vault and index, so a client's agents query the same brain.
-#   BRAIN_HOST=meerkat brain find "flow matching"
+#   BRAIN_HOST=myserver brain find "flow matching"
 set -euo pipefail
 
 root=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)

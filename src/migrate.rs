@@ -1,4 +1,4 @@
-//! B16: moving to a new host. `brain migrate` checks the procedure and changes nothing.
+//! Moving to a new host: `brain migrate` checks the procedure and changes nothing.
 
 use std::path::Path;
 use std::process::Command;

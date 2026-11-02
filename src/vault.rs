@@ -1,4 +1,4 @@
-//! The vault: `~/brain`, plain files in a local git repo with no remote (B11).
+//! The vault: `~/brain`, plain files in a local git repo with no remote.
 //!
 //! ```text
 //! docs/<dir>/<dir>.md   C1      pages/<slug>.md   C2      log/YYYY-MM-DD.md  C3

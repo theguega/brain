@@ -1,4 +1,4 @@
-//! Time follows you (B15): a timestamp is ISO 8601 with its offset, stored with the
+//! Time follows you: a timestamp is ISO 8601 with its offset, stored with the
 //! IANA zone and place read from C15 at capture time.
 
 use std::path::{Path, PathBuf};
