@@ -205,6 +205,12 @@ pub fn retry(vault: &Vault, index: &Path, limit: usize, lookup: Lookup<'_>) -> R
 
 /// arXiv papers whose note has no `builds_on` key, in id order.
 fn without_lineage(vault: &Vault) -> Result<Vec<(DocId, ArxivId)>> {
+    papers_without(vault, "builds_on")
+}
+
+/// arXiv papers whose note lacks a frontmatter key, in id order. A paper that lost the key
+/// to an edit and a paper that never had it are the same thing here: both want a refetch.
+pub fn papers_without(vault: &Vault, key: &str) -> Result<Vec<(DocId, ArxivId)>> {
     let docs = vault.path(Path::new("docs"));
     if !docs.is_dir() {
         return Ok(Vec::new());
@@ -223,7 +229,7 @@ fn without_lineage(vault: &Vault) -> Result<Vec<(DocId, ArxivId)>> {
             continue;
         };
         if meta.get("kind").and_then(Value::as_str) == Some("paper")
-            && meta.get("builds_on").is_none()
+            && meta.get(key).is_none()
             && let DocId::Arxiv(aid) = &id
         {
             out.push((id.clone(), aid.clone()));

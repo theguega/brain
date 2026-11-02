@@ -8,6 +8,7 @@ mod chunk;
 pub mod contract;
 pub mod doc;
 pub mod embed;
+pub mod enrich;
 pub mod error;
 pub mod eval;
 pub mod gpu;
