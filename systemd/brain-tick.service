@@ -6,4 +6,4 @@ Type=oneshot
 # Under systemd (INVOCATION_ID set) brain commits its vault writes before it exits.
 # The embed job stops itself after 10 minutes and the next tick continues; the timeout is a backstop.
 TimeoutStartSec=30min
-ExecStart=%h/.local/bin/brain tick
+ExecStart=%h/.cargo/bin/brain tick
