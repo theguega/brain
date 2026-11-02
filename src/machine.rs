@@ -24,9 +24,9 @@ pub enum Op {
     Add {
         /// The machine's ssh name
         ssh: String,
-        /// This host's ssh name, as the machine knows it [default: this machine's hostname]
+        /// This host's ssh name, as the machine knows it
         #[arg(long)]
-        host: Option<String>,
+        host: String,
     },
 }
 
@@ -34,10 +34,7 @@ pub fn run(op: &Op) -> Result<Vec<(&'static str, Value)>> {
     match op {
         Op::Add { ssh, host } => {
             let ssh = name(ssh)?;
-            let host = match host {
-                Some(h) => name(h)?.to_owned(),
-                None => hostname()?,
-            };
+            let host = name(host)?;
             ship(ssh, "~/.local/bin", "brain", BRAIN_SSH, "755")?;
             ship(ssh, "~/.agents/skills/brain", "SKILL.md", SKILL, "644")?;
             // Claude Code reads its skills from ~/.claude/skills: link them when nothing is there
@@ -73,15 +70,6 @@ fn name(s: &str) -> Result<&str> {
     } else {
         Err(Error::Usage(format!("not an ssh name: {s:?}")))
     }
-}
-
-fn hostname() -> Result<String> {
-    let out = Command::new("hostname")
-        .arg("-s")
-        .output()
-        .map_err(|e| Error::Usage(format!("hostname: {e}")))?;
-    let h = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    name(&h).map(str::to_owned)
 }
 
 // Written under a new name and moved over, so a symlink from an older install is replaced, not
