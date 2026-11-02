@@ -79,8 +79,11 @@ point elsewhere.
 ### The agent skill
 
 ```bash
-mkdir -p ~/.claude/skills/brain && brain --skill > ~/.claude/skills/brain/SKILL.md
+mkdir -p ~/.agents/skills/brain && brain --skill > ~/.agents/skills/brain/SKILL.md
 ```
+
+Claude Code reads `~/.claude/skills`; link it to the shared copy with
+`ln -s ~/.agents/skills/brain ~/.claude/skills/brain`. `brain-install` does this on a client.
 
 The skill teaches an agent when to search, how to read results and citations, and to
 write only what you ask. It works with any harness that reads `SKILL.md` files.
@@ -113,9 +116,15 @@ changed, and regenerate the profile nightly. With nothing to do it does nothing.
 
 ## Use it from other machines
 
-Keep one vault on one host. Elsewhere, link `bin/brain-ssh` as `brain` on your `PATH` and
-set `BRAIN_HOST` to the host's ssh name: every command runs on the host, and `--skill` is
-answered locally.
+Keep one vault on one host. Elsewhere, with ssh to the host working, install the client from
+the host's checkout:
+
+```bash
+ssh myhost cat Developer/brain/bin/brain-install | bash -s myhost
+```
+
+This puts `brain` in `~/.local/bin` and the skill in `~/.agents/skills/brain`. Every command
+runs on the host, and rerunning the line updates both.
 
 ## Configuration
 
