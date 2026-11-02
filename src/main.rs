@@ -21,6 +21,7 @@ use brain::{
 
 mod wiki_cli;
 
+mod machine;
 mod ops;
 
 /// brain: the knowledge layer. A vault of plain files in a local git repo, and one CLI.
@@ -170,6 +171,11 @@ enum Cmd {
     },
     #[command(flatten)]
     Ops(ops::Ops),
+    /// Set up clients on other machines (see `brain machine add --help`)
+    Machine {
+        #[command(subcommand)]
+        op: machine::Op,
+    },
 }
 
 fn day_parser(s: &str) -> std::result::Result<String, String> {
@@ -259,6 +265,9 @@ fn run(cli: &Cli) -> Result<(Reply, ExitCode)> {
     };
     if let Cmd::Ops(o) = cmd {
         return ops::run(&root, o);
+    }
+    if let Cmd::Machine { op } = cmd {
+        return machine::run(op).map(|fields| (Reply::Fields(fields), ExitCode::SUCCESS));
     }
     if let Some(reply) = read(&root, cmd)? {
         return Ok((reply, ExitCode::SUCCESS));
@@ -517,6 +526,7 @@ fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
         | Cmd::Pages { .. }
         | Cmd::Reindex { .. }
         | Cmd::Ops(_)
+        | Cmd::Machine { .. }
         | Cmd::Wiki { .. } => {
             return Err(Error::Usage("not a write command".to_owned()));
         }
