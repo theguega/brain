@@ -98,6 +98,52 @@ pub struct Paper {
     pub builds_on: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<Card>,
+    /// What the Hub attached to it: released models, datasets, demo Spaces. Facts about the
+    /// ecosystem around the paper, so not `links` (the paper's own claims) and not `card`
+    /// (extracted from its text). Absent when the Hub has nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub: Option<Hub>,
+}
+
+/// A paper's Hugging Face footprint. The Hub lists only the top few artifacts of each kind,
+/// so `counts` carries the full totals: 4 shown of 114 models is a different paper from 4 of 4.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hub {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub datasets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "HubCounts::is_zero")]
+    pub counts: HubCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upvotes: Option<u64>,
+    /// Stars on the linked GitHub repo, when the Hub knows one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stars: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HubCounts {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub models: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub datasets: usize,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spaces: usize,
+}
+
+impl HubCounts {
+    fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]

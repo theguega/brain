@@ -246,15 +246,16 @@ fn add_paper(vault: &Vault, aid: &ArxivId, opts: &AddOpts) -> Result<Added> {
         (None, None) => return Err(Error::Unknown(id.to_string())),
     };
     let ax = ax.unwrap_or_default();
-    if let Some(h) = hub {
+    if let Some(h) = &hub {
         p.links = PaperLinks {
-            code: h.github_repo.filter(|u| !u.is_empty()),
-            project: h.project_page.filter(|u| !u.is_empty()),
+            code: h.github_repo.clone().filter(|u| !u.is_empty()),
+            project: h.project_page.clone().filter(|u| !u.is_empty()),
             hf: Some(format!("https://huggingface.co/papers/{aid}")),
             ..PaperLinks::default()
         };
-        p.summary = Some(h.ai_summary).filter(|s| !s.is_empty());
-        p.keywords = h.ai_keywords;
+        p.summary = Some(h.ai_summary.clone()).filter(|s| !s.is_empty());
+        p.keywords = h.ai_keywords.clone();
+        p.hub = h.block();
     }
     p.links.code = p.links.code.or(ax.code).or(comment_code);
     p.links.project = p.links.project.or(comment_project);

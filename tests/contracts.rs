@@ -7,7 +7,8 @@
 
 use brain::contract::{self, JobLine, Kind, Problem, Profile, Repo, Schema};
 use brain::doc::{
-    Artifact, Card, Doc, Family, Fields, Meeting, Paper, PaperLinks, Tag, Taint, Web,
+    Artifact, Card, Doc, Family, Fields, Hub, HubCounts, Meeting, Paper, PaperLinks, Tag, Taint,
+    Web,
 };
 use brain::label::{Label, Verdict};
 use brain::log::Entry;
@@ -131,6 +132,18 @@ fn c1_doc_types_match_their_schemas() {
         keywords: vec!["vla".to_owned()],
         builds_on: Some(vec!["[[arxiv--2504.16054]]".to_owned()]),
         card: Some(card),
+        hub: Some(Hub {
+            models: vec!["lerobot/pi0_old".to_owned()],
+            datasets: Vec::new(),
+            spaces: vec!["HuggingFaceVLA/libero-vla-leaderboard".to_owned()],
+            counts: HubCounts {
+                models: 114,
+                datasets: 7,
+                spaces: 6,
+            },
+            upvotes: Some(31),
+            stars: Some(14491),
+        }),
     };
     let paper = doc("arxiv:2410.24164", Kind::PAPER, paper);
     assert_eq!(paper.taint, Taint::External);

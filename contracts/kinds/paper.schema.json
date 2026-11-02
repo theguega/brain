@@ -274,6 +274,61 @@
         "family"
       ],
       "additionalProperties": false
+    },
+    "hub": {
+      "description": "The paper's Hugging Face footprint: released models, datasets and demo Spaces, with full totals, since the Hub lists only the top few of each. Facts about the ecosystem, not claims from the paper.",
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        },
+        "datasets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        },
+        "spaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "models": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "datasets": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "spaces": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "upvotes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stars": {
+          "description": "Stars on the linked GitHub repository.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

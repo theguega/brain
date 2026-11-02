@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::doc::{Hub, HubCounts};
 use crate::error::{Error, Result};
 use crate::id::ArxivId;
 use crate::net;
@@ -70,6 +71,55 @@ pub struct Info {
     pub github_repo: Option<String>,
     #[serde(default, rename = "projectPage")]
     pub project_page: Option<String>,
+    #[serde(default)]
+    pub upvotes: Option<u64>,
+    #[serde(default, rename = "githubStars")]
+    pub github_stars: Option<u64>,
+    #[serde(default, rename = "linkedModels")]
+    pub linked_models: Vec<Artifact>,
+    #[serde(default, rename = "linkedDatasets")]
+    pub linked_datasets: Vec<Artifact>,
+    #[serde(default, rename = "linkedSpaces")]
+    pub linked_spaces: Vec<Artifact>,
+    #[serde(default, rename = "numTotalModels")]
+    pub num_models: Option<usize>,
+    #[serde(default, rename = "numTotalDatasets")]
+    pub num_datasets: Option<usize>,
+    #[serde(default, rename = "numTotalSpaces")]
+    pub num_spaces: Option<usize>,
+}
+
+/// One linked model, dataset or Space: the id is all brain keeps.
+#[derive(Debug, Deserialize)]
+pub struct Artifact {
+    pub id: String,
+}
+
+impl Info {
+    /// The paper's `hub:` block, or `None` when the Hub listed no artifact and voted nothing.
+    #[must_use]
+    pub fn block(&self) -> Option<Hub> {
+        let ids = |a: &[Artifact]| a.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+        let block = Hub {
+            models: ids(&self.linked_models),
+            datasets: ids(&self.linked_datasets),
+            spaces: ids(&self.linked_spaces),
+            counts: HubCounts {
+                models: self.num_models.unwrap_or(0),
+                datasets: self.num_datasets.unwrap_or(0),
+                spaces: self.num_spaces.unwrap_or(0),
+            },
+            upvotes: self.upvotes.filter(|n| *n > 0),
+            stars: self.github_stars.filter(|n| *n > 0),
+        };
+        let empty = block.models.is_empty()
+            && block.datasets.is_empty()
+            && block.spaces.is_empty()
+            && block.counts == HubCounts::default()
+            && block.upvotes.is_none()
+            && block.stars.is_none();
+        (!empty).then_some(block)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +127,7 @@ pub struct Author {
     pub name: String,
 }
 
-/// Hub record for one paper, or `None` if the Hub does not index it.
+/// Decode a Hub record; `Ok(None)` when the Hub does not index the paper.
 pub fn info(id: &ArxivId) -> Result<Option<Info>> {
     let token = auth();
     let r = net::get_as(&format!("{HUB}/api/papers/{id}"), auth_ref(&token))?;
