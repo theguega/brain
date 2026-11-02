@@ -8,13 +8,16 @@ use serde_json::{Value, json};
 use brain::contract::Kind;
 use brain::doc::Tag;
 use brain::embed::Embedder;
+use brain::hub;
 use brain::index::{self, Index};
 use brain::ingest::{self, AddOpts, Added};
 use brain::label::{self, Label, Verdict};
 use brain::log::{self, Entry};
 use brain::repos::{self, Config};
 use brain::search::{self, Filter};
-use brain::{Error, Rel, Result, Slug, Vault, lineage, lint, page, pwc, time, vault, wiki};
+use brain::{
+    ArxivId, DocId, Error, Rel, Result, Slug, Vault, lineage, lint, page, pwc, time, vault, wiki,
+};
 
 mod wiki_cli;
 
@@ -73,6 +76,17 @@ enum Cmd {
         /// Doc id, or an arXiv id or URL
         id: String,
         verdict: Verdict,
+    },
+    /// The Hub's daily papers, most upvoted first; mark one with `brain label`
+    ///
+    /// `have` means the paper is already in the vault. One request, no model, no quota.
+    Discover {
+        /// The day, `YYYY-MM-DD`; the Hub's current list when omitted
+        #[arg(long)]
+        date: Option<String>,
+        /// Only the N with the most upvotes
+        #[arg(long, default_value = "20")]
+        limit: usize,
     },
     /// Add `[[b]]` to page a's `rel` frontmatter property, a typed relation Obsidian draws
     Link {
@@ -360,6 +374,38 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
                 total: total.to_string(),
             }
         }
+        Cmd::Discover { date, limit } => {
+            let mut papers = hub::daily(date.as_deref())?;
+            // Most upvoted first: the Hub lists in submission order, which is noise.
+            papers.sort_by_key(|d| std::cmp::Reverse(d.paper.upvotes.unwrap_or(0)));
+            let vault = Vault::open_or_create(root)?;
+            let mut rows: Vec<Vec<Value>> = Vec::new();
+            for d in papers.iter().take(*limit) {
+                let p = &d.paper;
+                // A malformed id still lists; it just cannot be in the vault.
+                let has = ArxivId::parse(&p.id).is_ok_and(|a| vault.has_doc(&DocId::Arxiv(a)));
+                rows.push(vec![
+                    json!(format!("arxiv:{}", p.id)),
+                    json!(p.upvotes.unwrap_or(0)),
+                    json!(p.title),
+                    json!(if has { "have" } else { "" }),
+                    json!(p.github_repo.clone().unwrap_or_default()),
+                ]);
+            }
+            let table = Reply::Table {
+                name: "papers",
+                cols: &["id", "upvotes", "title", "have", "code"],
+                rows,
+                total: papers.len().to_string(),
+            };
+            if papers.is_empty() {
+                let why =
+                    "the Hub has opened no papers for that day yet; try --date tomorrow or none";
+                Reply::Many(vec![Reply::Fields(vec![("empty", json!(why))]), table])
+            } else {
+                table
+            }
+        }
         Cmd::Pages { kind } => {
             let rows: Vec<Vec<Value>> = search::pages(&Vault::open(root)?, kind.as_deref())?
                 .into_iter()
@@ -409,6 +455,8 @@ fn read(root: &Path, cmd: &Cmd) -> Result<Option<Reply>> {
 
 fn write(vault: &Vault, cmd: &Cmd) -> Result<(Reply, ExitCode)> {
     let reply = match cmd {
+        // Reads, answered by `read` before this runs.
+        Cmd::Discover { .. } => return Err(Error::Usage("discover writes nothing".to_owned())),
         Cmd::Add {
             source,
             kind,

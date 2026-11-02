@@ -159,19 +159,27 @@ pub struct DailyPaper {
     pub published_at: String,
     #[serde(default)]
     pub ai_keywords: Vec<String>,
+    #[serde(default)]
+    pub upvotes: Option<u64>,
+    #[serde(default, rename = "githubRepo")]
+    pub github_repo: Option<String>,
 }
 
-/// The Hub's curated daily list for `date` (`YYYY-MM-DD`).
-pub fn daily(date: &str) -> Result<Vec<Daily>> {
+/// The Hub's curated daily list: `date` (`YYYY-MM-DD`), or its current one when `None`.
+///
+/// The Hub's day is UTC, and a day it has not opened yet answers with an empty list, which is
+/// why the default is the undated call rather than the local date.
+pub fn daily(date: Option<&str>) -> Result<Vec<Daily>> {
+    let mut url = format!("{HUB}/api/daily_papers?limit=100");
+    if let Some(d) = date {
+        url.push_str(&format!("&date={d}"));
+    }
     let token = auth();
     let auth = auth_ref(&token);
-    let r = net::get_as(
-        &format!("{HUB}/api/daily_papers?date={date}&limit=100"),
-        auth,
-    )?;
+    let r = net::get_as(&url, auth)?;
     if !(200..300).contains(&r.status) {
         return Err(Error::Http {
-            url: format!("{HUB}/api/daily_papers?date={date}"),
+            url,
             status: r.status,
         });
     }
