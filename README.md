@@ -32,7 +32,7 @@ Other machines run brain on the host over ssh: link `bin/brain-ssh` as `brain` o
 set `BRAIN_HOST` to the host's ssh name. `--skill` is answered locally; every other command
 runs on the host.
 
-Runtime needs `git` and `curl`, `rg` for `brain code`, and an OpenAI-compatible
+Runtime needs `git` and `curl`, `rg` for `brain code`, poppler (`pdftotext`, `pdfinfo`) for PDFs and `unzip` for epubs, and an OpenAI-compatible
 embedding server (default `http://localhost:11434/v1/embeddings`, model
 `qwen3-embedding:0.6b`; `BRAIN_EMBED_URL` and `BRAIN_EMBED_MODEL` change them). Without
 it, `find` runs on BM25 alone and says `degraded: no vectors`.
