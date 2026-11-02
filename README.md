@@ -124,6 +124,7 @@ answered locally.
 | Vault | `~/brain` | `--vault`, `BRAIN_VAULT` |
 | Repo roots | `~/Developer` | `repos.toml` in the vault: `roots`, `include`, `exclude` |
 | Embedder | Ollama on localhost, `qwen3-embedding:0.6b` | `BRAIN_EMBED_URL`, `BRAIN_EMBED_MODEL`, `BRAIN_EMBED_TIMEOUT` |
+| GPU sharing | embedding waits while other processes hold >2 GB of GPU memory | `BRAIN_EMBED_DEVICE=cpu` for a CPU-only embedder, which never waits |
 | Index | `~/.cache/brain/index.db` | `XDG_CACHE_HOME` |
 | State (jobs, eval, queries) | `~/.local/state/brain/` | `XDG_STATE_HOME` |
 | Timezone and place | system zone | `~/.local/state/context.json` |

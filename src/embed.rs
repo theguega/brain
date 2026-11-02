@@ -2,7 +2,8 @@
 //!
 //! `BRAIN_EMBED_URL` (default [`DEFAULT_URL`]) and `BRAIN_EMBED_MODEL` (default
 //! [`DEFAULT_MODEL`]) pick the server and model; `BRAIN_EMBED_TIMEOUT` is the seconds a
-//! reindex batch may take (default [`BATCH_SECS`]). A query gets [`QUERY_SECS`], then
+//! reindex batch may take (default [`BATCH_SECS`]). `BRAIN_EMBED_DEVICE=cpu` says the server
+//! never uses the GPU, so the embed job ignores a busy GPU. A query gets [`QUERY_SECS`], then
 //! `find` goes on without vectors.
 
 use serde::Deserialize;
@@ -28,6 +29,8 @@ pub struct Embedder {
     pub url: String,
     pub model: String,
     pub batch_secs: u64,
+    /// The server runs on CPU only: a busy GPU does not hold the embed job back.
+    pub cpu: bool,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +57,7 @@ impl Embedder {
             url: var("BRAIN_EMBED_URL", DEFAULT_URL),
             model: var("BRAIN_EMBED_MODEL", DEFAULT_MODEL),
             batch_secs: var("BRAIN_EMBED_TIMEOUT", "").parse().unwrap_or(BATCH_SECS),
+            cpu: var("BRAIN_EMBED_DEVICE", "") == "cpu",
         }
     }
 

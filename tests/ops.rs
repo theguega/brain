@@ -100,6 +100,7 @@ struct Env {
     tz: String,
     embed_url: String,
     path: String,
+    extra: Vec<(&'static str, &'static str)>,
 }
 
 impl Env {
@@ -133,6 +134,7 @@ impl Env {
             dir,
             tz,
             embed_url: embed_url.to_owned(),
+            extra: Vec::new(),
         };
         fs::create_dir_all(env.vault()).unwrap();
         env.git(&["init", "-q"]);
@@ -212,6 +214,7 @@ impl Env {
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "test")
             .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .envs(self.extra.iter().copied())
             .args(args)
             .output()
             .unwrap()
@@ -366,6 +369,11 @@ fn a_busy_gpu_skips_the_embed_job_and_logs_it() {
     );
     // Still due: it runs when the GPU frees up.
     assert!(env.ok(&["tick", "--dry-run"]).contains("embed,"));
+    // A CPU-only embedder ignores the GPU; here it is down, so it says that instead.
+    env.extra.push(("BRAIN_EMBED_DEVICE", "cpu"));
+    let out = env.ok(&["tick"]);
+    assert!(!out.contains("gpu busy"), "{out}");
+    assert!(out.contains("skipped: embedder down: embed\n"), "{out}");
 }
 
 fn lines_of(env: &Env, job: &str) -> Vec<Value> {
@@ -583,6 +591,7 @@ fn embed_stops_at_its_budget_and_the_next_call_continues() {
         url: env.embed_url.clone(),
         model: "m".to_owned(),
         batch_secs: 10,
+        cpu: false,
     };
     let db = env.dir.join("idx/index.db");
     let vault = brain::Vault::open(&env.vault()).unwrap();
@@ -613,6 +622,7 @@ fn concurrent_reindexes_do_not_collide_on_the_index() {
         url: env.embed_url.clone(),
         model: "m".to_owned(),
         batch_secs: 1,
+        cpu: false,
     };
     let db = env.dir.join("idx/index.db");
     std::thread::scope(|s| {

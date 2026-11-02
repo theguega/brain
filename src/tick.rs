@@ -265,7 +265,7 @@ impl Ctx<'_> {
                 st.indexed_head = Some(self.head.clone());
             }
             "embed" => {
-                if gpu::busy(&self.embedder.url) {
+                if !self.embedder.cpu && gpu::busy(&self.embedder.url) {
                     return Ok(Done::Skipped("gpu busy"));
                 }
                 match index::embed(&self.db, &self.embedder, EMBED_BUDGET)? {

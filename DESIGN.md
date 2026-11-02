@@ -198,7 +198,8 @@ tick one per tick, so a dead timer shows as stale.
 
 Jobs that need a model (compile, learn, wiki-lint, plan, review) are agent runs started
 through an agent runtime; until one is configured, the tick prints them as skipped. GPU
-jobs skip while another process holds more than 2 GB of GPU memory, and a failed job backs
+jobs skip while another process holds more than 2 GB of GPU memory (unless
+`BRAIN_EMBED_DEVICE=cpu` says the embedder never touches the GPU), and a failed job backs
 off for an hour without stopping the others.
 
 ## Profile
