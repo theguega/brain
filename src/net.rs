@@ -42,12 +42,15 @@ pub(crate) enum Method<'a> {
     PostJson(&'a str),
 }
 
+/// The header pair for an authorised request: `Some(("Authorization", "Bearer …"))`.
+pub(crate) type Auth<'a> = Option<(&'a str, &'a str)>;
+
 /// One request. 429 and 5xx are retried with backoff, waiting as long as the server asks
 /// (`Retry-After`) up to [`MAX_WAIT`]; any other status is returned as is.
-pub(crate) fn request(url: &str, method: Method<'_>) -> Result<Response> {
+pub(crate) fn request(url: &str, method: Method<'_>, auth: Auth<'_>) -> Result<Response> {
     let mut wait = Duration::from_secs(3);
     for _ in 1..ATTEMPTS {
-        let r = curl(url, method, MAX_TIME)?;
+        let r = curl(url, method, auth, MAX_TIME)?;
         if r.status != 429 && r.status < 500 {
             return Ok(r);
         }
@@ -58,11 +61,16 @@ pub(crate) fn request(url: &str, method: Method<'_>) -> Result<Response> {
         sleep(wait);
         wait *= 2;
     }
-    curl(url, method, MAX_TIME)
+    curl(url, method, auth, MAX_TIME)
 }
 
 pub(crate) fn get(url: &str) -> Result<Response> {
-    request(url, Method::Get)
+    request(url, Method::Get, None)
+}
+
+/// A GET carrying a bearer header: a higher rate-limit bucket, never a blanket credential.
+pub(crate) fn get_as(url: &str, auth: Auth<'_>) -> Result<Response> {
+    request(url, Method::Get, auth)
 }
 
 /// GET that treats any non-2xx as an error.
@@ -71,12 +79,12 @@ pub(crate) fn get_ok(url: &str) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn post_json_ok(url: &str, body: &str) -> Result<Vec<u8>> {
-    ok(url, request(url, Method::PostJson(body))?)
+    ok(url, request(url, Method::PostJson(body), None)?)
 }
 
 /// One POST, no retry, given up after `secs`: for a caller that has a fallback.
 pub(crate) fn post_json_within(url: &str, body: &str, secs: u64) -> Result<Vec<u8>> {
-    ok(url, curl(url, Method::PostJson(body), secs)?)
+    ok(url, curl(url, Method::PostJson(body), None, secs)?)
 }
 
 pub(crate) fn download(url: &str, to: &Path) -> Result<()> {
@@ -98,7 +106,7 @@ fn ok(url: &str, r: Response) -> Result<Vec<u8>> {
     }
 }
 
-fn curl(url: &str, method: Method<'_>, max_time: u64) -> Result<Response> {
+fn curl(url: &str, method: Method<'_>, auth: Auth<'_>, max_time: u64) -> Result<Response> {
     let fail = |detail: String| Error::Network {
         url: url.to_owned(),
         detail,
@@ -121,6 +129,9 @@ fn curl(url: &str, method: Method<'_>, max_time: u64) -> Result<Response> {
         "-w",
         "%{stderr}%{http_code}",
     ]);
+    if let Some((name, value)) = auth {
+        cmd.args(["-H", &format!("{name}: {value}")]);
+    }
     let stdin = match method {
         Method::Get => Stdio::null(),
         Method::PostJson(_) => {
