@@ -259,7 +259,7 @@ ships only if recall holds.
 The system is `~/brain`, `~/.local/state`, `~/.config/brain` and your dotfiles. `brain
 migrate` checks the move: restore the backup, set up the machine, `brain reindex --full`,
 enable the timer, and compare `brain eval` with the last score. Other machines run brain on
-the host over ssh through `bin/brain-ssh`, which `bin/brain-install` copies with the skill.
+the host over ssh through `bin/brain-ssh`, which `brain machine add` copies with the skill.
 
 ## Non-goals
 

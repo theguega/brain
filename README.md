@@ -83,7 +83,7 @@ mkdir -p ~/.agents/skills/brain && brain --skill > ~/.agents/skills/brain/SKILL.
 ```
 
 Claude Code reads `~/.claude/skills`; link it to the shared copy with
-`ln -s ~/.agents/skills/brain ~/.claude/skills/brain`. `brain-install` does this on a client.
+`ln -s ~/.agents/skills/brain ~/.claude/skills/brain`. `brain machine add` does this on a client.
 
 The skill teaches an agent when to search, how to read results and citations, and to
 write only what you ask. It works with any harness that reads `SKILL.md` files.
@@ -116,15 +116,17 @@ changed, and regenerate the profile nightly. With nothing to do it does nothing.
 
 ## Use it from other machines
 
-Keep one vault on one host. Elsewhere, with ssh to the host working, install the client from
-the host's checkout:
+Keep one vault on one host. To add a client, run this on the host, with ssh to the client
+working without a prompt:
 
 ```bash
-ssh myhost cat Developer/brain/bin/brain-install | bash -s myhost
+brain machine add laptop
 ```
 
-This puts `brain` in `~/.local/bin` and the skill in `~/.agents/skills/brain`. Every command
-runs on the host, and rerunning the line updates both.
+It copies `brain-ssh` and the skill, both from this build, to the client: `~/.local/bin/brain`
+and `~/.agents/skills/brain`. It also links `~/.claude/skills/brain`. Set `BRAIN_HOST` to this
+host's ssh name in the client's shell; `--host` sets the name the client checks with. Every
+command runs on the host, and rerunning the line updates both.
 
 ## Configuration
 
