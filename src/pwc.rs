@@ -1,5 +1,13 @@
-//! Papers with Code (paperswithcode.co): `tldr`, venue and lineage. Its code links,
-//! tasks and methods are not used: on π0 they are empty, too coarse, or wrong.
+//! Papers with Code (paperswithcode.co): `tldr`, venue and lineage. Its code links, tasks
+//! and methods are not used: on π0 they are empty, too coarse, or wrong.
+//!
+//! `citation_count` is not stored either. PwC and alphaXiv disagree on it by up to a quarter
+//! in both directions (π0: 3224 against 4022; diffusion-policy: 4769 against 4048), so one
+//! number in the note would look authoritative while being an arbitrary pick between two.
+//!
+//! The API answers a trailing slash with a 307 to http and then a 301 back to https, so the
+//! path is built without one: three requests per paper become one, which matters because the
+//! host sheds load with 503 above roughly eight concurrent clients.
 
 use serde::Deserialize;
 
@@ -34,7 +42,7 @@ pub struct Related {
 
 /// The record for `id`, or `None` if PwC does not know it.
 pub fn paper(id: &ArxivId) -> Result<Option<Paper>> {
-    let url = format!("{API}/{id}/");
+    let url = format!("{API}/{id}");
     let r = net::get(&url)?;
     match r.status {
         404 => Ok(None),
