@@ -1,363 +1,277 @@
-# brain — design
+# Design
 
-brain is the knowledge layer: a vault of plain files, an index rebuilt from those files, one CLI, and one skill. It calls no model. The vault is the truth, and everything else can be rebuilt from it.
+brain is a knowledge layer for one person and their agents: a vault of plain files, an
+index rebuilt from those files, one CLI, and one agent skill. It calls no language model.
+The vault is the truth; everything else can be rebuilt from it.
 
-The repo is paperdb renamed (D2). It holds the Rust crate, `feed/` (Python, the paper and news feed), `planner/` (prompt files), and `contracts/` (JSON Schemas for C1–C16).
+## Principles
 
-Status: design, round 3. Requirements B1–B21, F1–F10, P1–P10.
+1. **Files are the truth.** Docs, wiki pages, the log and labels are markdown and JSON in a
+   local git repo. SQLite is only an index, and `brain reindex --full` rebuilds it.
+2. **Only what you mark.** Nothing enters the vault unless you add it. A rejected
+   candidate is stored only as a label.
+3. **Stores don't think.** brain fetches, parses, indexes and checks. Judgment (writing
+   wiki pages, planning) happens in agent runs outside the binary, and their output comes
+   back through brain's checks.
+4. **Token budget is a spec.** The profile a session loads is capped at 400 tokens, the
+   skill at 1,500, and long output is cut behind `--full`. The caps are tested.
+5. **Untrusted text is data.** Anything from outside is stored as `taint: external` and
+   printed inside a fence, so an injected instruction is never a bare line.
+6. **Evidence before features.** Rerankers, claim tables and code summaries wait until
+   `brain eval` shows a failure one of them fixes.
 
 ## Layers
 
-| Layer | Owns | Language |
+| Layer | Owns | Where |
 |---|---|---|
-| vault | `~/brain`: docs, pages, log, chats, labels, profile | files |
-| index | `~/.cache/brain/index.db`: chunks, FTS5, vectors, links | Rust (rusqlite) |
-| CLI + skill | the agent contract (C4, C5) | Rust |
-| feed | candidate pool, ranker, daily selection (C6, C7) | Python (uv) |
-| planner | prompt files and deterministic checks, run through drover | files + Rust |
-| contracts | `contracts/*.schema.json`, golden tests | JSON Schema |
+| vault | docs, pages, log, labels, profile, eval questions | `~/brain` (git, no remote) |
+| index | chunks, FTS5, vectors, links, repos | `~/.cache/brain/index.db` |
+| CLI + skill | the agent interface | `brain`, `skill/SKILL.md` |
+| contracts | the file and output formats | `contracts/*.schema.json` |
+| state | job and eval history, queries | `~/.local/state/brain/` |
 
-## Jobs: cron, lazy, event (B20)
+## Contracts
 
-The brain serves three goals, and every job exists for at least one of them:
-- **Learn:** keep learning and see your progress. What you read becomes cited wiki pages, and your corrections make it better.
-- **Find:** everything you know is searchable from one CLI.
-- **Plan:** the day is proposed, captured and reviewed.
+Each format other programs read is a JSON Schema in `contracts/`, with a `version` field.
+Changes only add; a breaking change bumps the version. The code names them by id.
 
-Jobs come in three kinds, so work happens when it's useful and nothing runs just because it's time:
-- **cron:** a fixed local time (C15), for things you expect at a moment of the day.
-- **lazy:** checked by `brain tick` every 15 minutes with a cheap `due` test (a file hash, a queue length, a label count). It runs only when there is work, and does nothing otherwise.
-- **event:** runs right away, inside the command that caused it.
-
-| Job | Kind | When | Does | Model | Serves |
-|---|---|---|---|---|---|
-| feed | cron | 06:00 | fetch, dedupe, rank, select (F1–F10) | free tier, summaries only | Learn |
-| plan | cron | 07:30 weekdays | plan proposal (P1) | reader run | Plan |
-| shutdown | cron | 18:30 | commits, PRs, tasks, runs → `log/` (P5) | none | Plan, Learn |
-| profile | cron | 03:00 | regenerate `profile.md` (C5) | none | Find, Plan |
-| review | cron | Sunday 18:00 | the week: time, focus, progress (P6) | reader run | Plan, Learn |
-| learn | cron | Sunday, before review | corrections → proposals and eval questions (P10) | reader run | Learn, Find |
-| wiki-lint | cron | Sunday, before review | semantic wiki check (P9) | reader run | Find |
-| backup | cron | 02:00 | restic of the vault and state (S4) | none | — |
-| reindex | lazy | the vault's HEAD moved since the last index | incremental reindex (B1) | none | Find |
-| embed | lazy | chunks without vectors, and the GPU is free (S6) | fill vectors (B12) | local embedder | Find |
-| repos | lazy | a registered repo's HEAD moved (C13) | index its markdown, commits and card | none | Find, Plan |
-| compile | lazy | `wiki queue` not empty, 22:00–06:00, ≤5 a night | doc → wiki proposal (P8) | reader run | Learn, Find |
-| ranker | lazy | ≥20 new labels since the last training, once a day at most | retrain and calibrate (F4) | none | Learn |
-| news queries | lazy | `profile.md` changed | regenerate the F10 queries | free tier | Learn |
-| eval | lazy | the retrieval code or `eval/questions.jsonl` changed | recall@8 and tokens (B8) | none | Find |
-| like | event | `brain label <id> like` | `add`, then queue for compile | none | Learn |
-| merge | event | `brain wiki merge` | reindex the changed pages, log, add eval questions | none | Learn, Find |
-| run done | event | `drover done` | journal entry → `brain log` | none | Plan, Learn |
-
-Rules:
-- `brain tick` is the only scheduler: one systemd timer runs it every 15 minutes. It decides what's due and starts reader runs through drover. It calls no model itself.
-- Night and GPU windows keep the model jobs off your working hours and off training runs.
-- Every job that runs appends a C10 line. The tick also appends one line per tick, so a dead tick shows as stale even when no lazy job had work.
+| Id | Contract | Shape |
+|---|---|---|
+| C1 | Doc | `docs/<dir>/<dir>.md`: YAML frontmatter validated against `contracts/kinds/<kind>.schema.json`, the full text as body |
+| C2 | Page | `pages/<slug>.md`: frontmatter `{kind, title, summary, status, sources[], updated, superseded_by?, aliases?, tags?}` and a markdown body |
+| C3 | Log entry | `log/YYYY-MM-DD.md`, one `## <ISO time> · <IANA tz> · <place> · <source> · <title>` block per entry |
+| C4 | CLI output | lists, `key: value`, `--json` JSONL, `error:`/`next:`, exit 0/1/2 (see CLI) |
+| C5 | Profile | `profile.md`, at most 400 tokens |
+| C7 | Label | `labels.jsonl` `{id, verdict: like\|skip\|later, ts, surface}` |
+| C10 | Job status | `jobs.jsonl` `{job, started, ended, ok, err}` |
+| C13 | Repo | `{name, path, remote, project}` from `repos.toml` |
+| C15 | Context | `~/.local/state/context.json` `{tz, place?, updated_at, source}` |
 
 ## Vault
 
 ```text
-~/brain/                      local git, no remote (Q15)
-  docs/<id>/<id>.md           C1: frontmatter = kind, title, required metadata per kind; body = full text
-  docs/<id>/source.<ext>      a book's original file; an artifact's index.html (text extracted at index time)
-  pages/<slug>.md             C2: the wiki: people, projects, decisions, concepts, syntheses
-  log/YYYY-MM-DD.md           C3: journal, plan, shutdown, chat summaries
-  chats/<id>.jsonl            raw chat transcripts (normalized C9 events)
-  labels.jsonl                C7: feed verdicts
-  profile.md                  C5: regenerated nightly, ≤400 tokens
-  repos.toml                  C13: roots, include/exclude globs
-  eval/questions.jsonl        B8: the 50 real questions
-  private/                    personal material (indexed like the rest)
+~/brain/                      local git, no remote
+  docs/<dir>/<dir>.md         C1: one note per doc
+  docs/<dir>/source.<ext>     an original that can't be re-fetched (a book's PDF or epub)
+  docs/<dir>/index.html       an artifact's page
+  pages/<slug>.md             C2: the wiki
+  log/YYYY-MM-DD.md           C3: decisions, results, journal, compile records
+  labels.jsonl                C7: verdicts
+  profile.md                  C5: regenerated nightly
+  repos.toml                  C13: roots and include/exclude globs (optional)
+  eval/questions.jsonl        the eval set
 ```
 
-Rules:
-- One writer per file type. `brain` writes docs, the log and the profile. `feed` writes `labels.jsonl` only through `brain label`. Pages are written by you, or by `brain wiki propose` on a branch that reaches `main` only through `brain wiki merge` (see Wiki).
-- A write goes to a temp file and is then renamed (`write_atomic`, kept from paperdb), and is committed to local git in the background, debounced to one commit per minute.
-- Nothing in the vault holds an absolute path or a hostname (B16).
+- brain is the only writer of docs, the log and the profile. Pages are written by you, or
+  arrive on a `wiki/*` branch that reaches `main` only through `brain wiki merge`.
+- A write goes to a temp file and is renamed into place, under a vault lock, then committed
+  to local git debounced to one commit a minute (synchronously when run by systemd).
+- Nothing in the vault holds an absolute path or a hostname, so it moves between machines
+  as is.
 
-## Obsidian-native
+### Obsidian-native
 
-The vault opens as an Obsidian vault, and its graph view is the brain's graph: the edges you see are the edges agents query.
-- **One note per doc.** `docs/<id>/<id>.md`, where `<id>` is the directory name, so `[[arxiv--2410.24164]]` resolves by file name. Its frontmatter holds the C1 metadata (shown in the properties panel), with `aliases` holding the title and short handles (`π0`), so `[[π0]]` also resolves.
-- **One link syntax.** A `[[wikilink]]` to a doc is a citation; a `[[wikilink]]` to a page is a cross-reference. A span is a heading: `[[arxiv--2410.24164#Method]]`, the same span `brain get` takes.
-- **Typed relations are frontmatter properties** whose values are wikilinks: `builds_on: ["[[arxiv--2504.16054]]"]`, `superseded_by`, `attendees`, `project`, or any name `brain link <a> <b> <rel>` writes. Obsidian draws them as graph edges; the index reads the property name as `rel`.
-- Frontmatter is YAML, parsed by one small crate shared by docs and pages; values that are wikilinks are quoted strings.
+The vault opens as an Obsidian vault, and its graph view is brain's graph.
+
+- **One note per doc.** `docs/arxiv--2410.24164/arxiv--2410.24164.md`: the directory name
+  is the id with `:` replaced by `--`, so `[[arxiv--2410.24164]]` resolves by file name.
+  `aliases` holds the title and short handles (`π0`).
+- **One link syntax.** A wikilink to a doc is a citation, to a page a cross-reference. A span
+  is a heading: `[[arxiv--2410.24164#Method]]`, the same span `brain get` takes.
+  `[[dir|label]]` works everywhere.
+- **Typed relations are frontmatter properties** with quoted wikilink values:
+  `builds_on: ["[[arxiv--2504.16054]]"]`, `superseded_by`, `attendees`, `project`, or any
+  name `brain link` writes. The index reads the property name as the relation.
 
 ## Kinds
 
-Each kind is a JSON Schema in `contracts/kinds/<kind>.schema.json`. Adding a kind adds a file and needs no code change (C1). `brain lint` validates every doc against its schema.
+A kind is a schema file; adding one needs no code change. `brain lint` validates every doc.
 
 | Kind | Required metadata | Filled by |
 |---|---|---|
-| paper | title, authors, date, venue?, `links{code, project, hf, openreview, video}` | arXiv, HF Hub (`githubRepo`, `projectPage`), alphaXiv, Papers with Code (`tldr`, lineage) |
-| book · course | title, authors, year, `links{home}` | you, or the PDF's metadata |
-| blog · news | title, url, site, date | page metadata (Jina Reader) |
+| paper | title, authors, date, `links{code, project, hf, openreview, video}` | arXiv, Hugging Face, alphaXiv, Papers with Code |
+| book, course | title, authors, year, `links{home}` | the file's metadata, then you |
+| blog, news | title, url, site, date | page metadata |
 | talk | title, speakers, date, `links{video, slides}` | you |
-| note | title | you |
-| artifact | title, why, source, captured_at | `brain add page.html --kind artifact --why` |
-| meeting | started_at, tz, place, attendees[] → pages, project? | you, by paste or file |
+| note | title | the file |
+| artifact | title, why, source, captured_at | `brain add page.html --why` |
+| meeting | started_at, tz, place, attendees → pages, project? | the file's frontmatter |
 
-**Lineage.** For papers, `add` also reads Papers with Code (`paperswithcode.co/api/v1/papers/<arxiv>/`) and stores its `predecessor_papers` and `successor_papers` as `builds_on` frontmatter properties, whether or not the other paper is in the library. Compile uses them to order a concept page's history (π0 → π0.5) instead of guessing it. PwC's code links, tasks and methods are not used: on π0 they are empty, too coarse, or wrong. If PwC is down, the paper just has no lineage yet, and the next `reindex` retries.
+`taint` follows from the kind: `note` and `meeting` are `own`, everything else `external`.
 
-Missing optional fields are fine. A missing required field is a `lint` error, and `add` reports it on the spot.
+**Lineage.** For papers, `add` reads Papers with Code and stores predecessors as the
+paper's own `builds_on`; a successor already in the vault gets the edge on its note. So
+`builds_on` always points from the later paper to the earlier one. If the service is
+down, the next `reindex` retries.
 
 ## Ids
 
-Ids are derived from the source, so an id can never disagree with its content (as in paperdb's `id.rs`):
-- `arxiv:2410.24164` (the version is dropped)
-- `web:<slug>`
-- `file:<sha256[:8]>`
-- `meeting:<date>-<slug>`
-- `artifact:<slug>`
+Ids are derived from the source, so an id never disagrees with its content:
+`arxiv:2410.24164` (version dropped), `web:<slug>`, `file:<sha256[:8]>`,
+`meeting:<date>-<slug>`, `artifact:<slug>`.
 
-The directory name is the id with `:` replaced by `--`.
-
-A `web:` slug is the canonical URL's host, path and query: `https`, host lowercased without `www.`, no fragment, no tracking params (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref`, `ref_src`), one trailing `/` dropped. A slug over 64 chars, or one another source already holds, ends in `-<sha256[:6]>` of the canonical URL (web) or of the HTML bytes (artifact). `add` finds a source under that id, its hashed form, or the id the older rule gave it, so re-adding never makes a twin. An id stored before its doc exists (a `label skip` or a `link` to a URL) names what the vault holds at that time: if another source takes that id first, the stored id names that doc.
+A `web:` slug comes from the canonical URL: `https`, lowercase host without `www.`, path and
+query without tracking parameters (`utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref`,
+`ref_src`), no fragment, no trailing `/`. A slug over 64 characters, or one another source
+already holds, ends in `-<sha256[:6]>` of the canonical URL (web) or the HTML bytes
+(artifact). Adding the same source again finds it and changes nothing.
 
 ## Time
 
-Every timestamp is ISO 8601 with its offset, plus the IANA timezone and a place, read from C15 (`~/.local/state/context.json`) at capture time (B15). Displays use the stored zone, not the viewer's. Day boundaries (`log/YYYY-MM-DD.md`, "today") use your current timezone.
+Every timestamp is ISO 8601 with its offset, plus the IANA zone and a place, read from C15
+at capture time, falling back to the system zone. Day boundaries use your current zone.
 
 ## Index
 
 ```sql
-docs(id PK, kind, title, date, meta JSON, hash, taint)          -- taint: own | external
+docs(id PK, kind, title, date, meta JSON, hash, taint)
 chunks(id PK, doc, ord, heading, text)
 chunks_fts USING fts5(heading, text, tokenize='porter unicode61')
-vectors(chunk PK, dim, v BLOB)                                   -- f16, L2-normalized
-links(src, dst, rel)                                             -- body [[wikilinks]] (rel: cites | mentions) and wikilink-valued frontmatter (rel: the property name)
+vectors(chunk PK, model, dim, v BLOB)       -- f16, L2-normalized
+links(src, dst, rel)                        -- indexed on src and dst
 repos(name PK, path, remote, head, indexed_at)
-PRAGMA user_version                                              -- a mismatch means drop and reindex
+PRAGMA user_version                         -- a mismatch drops and rebuilds
 ```
 
-- **Freshness:** each file's hash is compared with `docs.hash`, and only changed docs are re-chunked and re-embedded. `brain reindex --full` rebuilds from nothing, and the golden test checks that it gives identical `find` results (B1).
-- **Chunking:** split on headings, aiming for about 400 tokens with an overlap of 1 paragraph. Tables are kept whole in a chunk but stripped from snippets.
-- **Vectors:** from a local OpenAI-compatible `/v1/embeddings` server (default Qwen3-Embedding-0.6B, 1024-d, on CPU). They're stored as f16 BLOBs and searched by brute-force cosine in Rust: 10⁵ × 1024 is about 0.1 GFLOP, a few ms. This means no sqlite-vec, which would need `unsafe` to load (the crate has `unsafe_code = "forbid"`). If the embedder is down, search runs BM25-only and says `degraded: no vectors` (B12).
-- **Ranking:** BM25 (column weights inherited from paperdb) and cosine, fused with RRF: `score(d) = Σ_r 1/(60 + rank_r(d))`. Results are collapsed to the best chunk per doc. A title phrase match gives a boost, and an exact match on a page alias goes straight to that page. No reranker until the eval asks for one.
-- **Taint:** anything from outside (a paper, the web, news, an abstract) is `external`. `find` and `get` print its text inside a fence, `<<<external … >>>`, so an injected instruction is never a bare line (B5).
+- **Freshness.** Each file's hash is compared with `docs.hash`; only changed docs are
+  re-chunked and re-embedded. Deleting `index.db` and reindexing gives identical `find`
+  output, and a golden test checks it.
+- **Chunking.** Split on headings, about 400 tokens with one paragraph of overlap. Tables
+  stay whole.
+- **Vectors.** From any OpenAI-compatible `/v1/embeddings` server (default
+  `qwen3-embedding:0.6b` on Ollama), stored as f16 and searched by brute-force cosine:
+  10⁵ chunks × 1024 dims is a few milliseconds. No sqlite-vec, which would need `unsafe`.
+  Without an embedder, search runs on BM25 alone and says `degraded: no vectors`.
+- **Ranking.** BM25 (title weighted) and cosine, fused with reciprocal rank fusion,
+  `score(d) = Σ_r 1/(60 + rank_r(d))`, then collapsed to the best chunk per doc. A title
+  phrase match gets a boost; an exact page alias goes straight to that page.
+- **Links.** Built only from frontmatter relations and from body wikilinks in own-taint
+  notes (rel `cites` for a doc, `mentions` for a page). External text adds no edges.
 
-## Repos (C13)
+## Repos
 
-`repos.toml` lists the roots (default `~/Developer`) and include/exclude globs. Discovery finds every git checkout under those roots. For each repo the index holds:
-- its markdown files (README, AGENTS.md, DESIGN.md, `docs/**`) as `kind: note` chunks, `taint: own`
-- its commit messages since the last indexed `head`, as log-like chunks
-- a repo card: remote, languages, last activity, pages and papers linking to it
+`repos.toml` lists roots (default `~/Developer`) and include/exclude globs; every git
+checkout under a root is a repo. The index holds each repo's markdown, its commit messages
+since the last indexed head, and a repo card. Code is never copied: `brain code` runs
+`rg` live across the repos, capped at 20 hits and 10 seconds.
 
-Code is never copied. `brain code <q> [--repo]` runs `rg --json` across the registered repos and prints `repo:path:line | text`, capped at 20 hits.
+## CLI
 
-## CLI (C4)
+| Command | Does |
+|---|---|
+| `brain` | prints the profile |
+| `brain find <q>` | hybrid search over docs, pages, the log and repos |
+| `brain get <id>[#span]` | a doc, page, log block or repo file, capped at 1,000 chars |
+| `brain code <regex>` | live ripgrep across repos |
+| `brain add <arxiv\|url\|file>` | ingest, idempotent; reports missing metadata |
+| `brain log <text>` | appends a C3 block: first line title, rest body |
+| `brain label <id> like\|skip\|later` | appends C7; `like` also adds |
+| `brain link <page> <target> <rel>` | adds a typed relation to a page |
+| `brain pages` | the wiki catalog |
+| `brain wiki queue\|ls\|diff\|propose\|merge\|drop` | the wiki review loop |
+| `brain lint` | schemas plus wiki checks; exit 1 on errors |
+| `brain reindex [--full]` | brings the index in line with the vault |
+| `brain eval` | recall@8 and tokens per hit |
+| `brain profile` | regenerates the profile |
+| `brain tick [--dry-run]` | runs every due job once |
+| `brain migrate` | checks the steps for moving to a new host |
 
-| Command | Does | Output |
+Output rules (C4): a list prints `name[shown/total]{columns}:` with the id first; a single
+value prints `key: value`; `--json` prints JSONL; errors print `error:` then `next:`; exit
+codes are 0 ok, 1 error, 2 usage. `--help` is the only place flags are documented.
+
+## Jobs
+
+`brain tick` is the only scheduler; a systemd timer runs it every 15 minutes. Each job is
+**cron** (a fixed local time), **lazy** (a cheap `due` test, runs only when there is work),
+or **event** (inside the command that caused it). Every run appends a C10 line, and the
+tick one per tick, so a dead timer shows as stale.
+
+| Job | Kind | Runs when | Does |
+|---|---|---|---|
+| reindex | lazy | the vault's HEAD moved | incremental reindex, lineage retries |
+| embed | lazy | chunks lack vectors and the GPU is free | fills vectors, 10 minutes per tick |
+| repos | lazy | a repo's HEAD moved | indexes its markdown, commits and card |
+| eval | lazy | retrieval code or the eval set changed | recall@8 and tokens, logged per build |
+| profile | cron | 03:00 | regenerates `profile.md` |
+| merge | event | `brain wiki merge` | reindexes the pages, logs a compile block |
+
+Jobs that need a model (compile, learn, wiki-lint, plan, review) are agent runs started
+through an agent runtime; until one is configured, the tick prints them as skipped. GPU
+jobs skip while another process holds more than 2 GB of GPU memory, and a failed job backs
+off for an hour without stopping the others.
+
+## Profile
+
+`brain profile` assembles, with no model: three lines of focus from `pages/me.md`, active
+project pages updated in the last 14 days, today's plan items, items that need you, and one
+line reminding agents to search first. It is capped at 400 tokens by a tokenizer
+approximation.
+
+## Wiki
+
+The wiki follows Karpathy's LLM Wiki: instead of re-deriving answers from raw docs, an agent
+compiles what you mark into pages that hold the current synthesis. brain stays model-free:
+it queues, checks, stores and merges pages; the writing happens in agent runs.
+
+| Page kind | Holds | Citations |
 |---|---|---|
-| `brain` | prints the profile (C5) | the profile text |
-| `brain find <q> [--kind --since --repo --limit 8]` | hybrid search | `results[n/total]{id,kind,date,title,snippet}` |
-| `brain get <id>[#span] [--full]` | a doc, page or chunk, capped at 1000 chars | `key: value` plus a text block |
-| `brain code <q> [--repo]` | live rg across repos | `hits[n/total]{repo,path,line,text}` |
-| `brain add <arxiv\|url\|file> [--kind --why --tag]` | ingest, idempotent | `id`, `missing`, `help` |
-| `brain log <text> [--source]` | appends a C3 block | `at`, `file` |
-| `brain label <id> like\|skip\|later` | appends C7 (a like also runs `add`) | `id`, `verdict` |
-| `brain link <a> <b> <rel>` | adds a link to a page's frontmatter | `noop:` if it already exists |
-| `brain pages [--kind]` | the wiki catalog: one line per page | `pages[n/total]{slug,kind,updated,summary}` |
-| `brain wiki queue` | marked docs no compile has covered yet | `queue[n/total]{id,kind,added}` |
-| `brain wiki ls` · `diff <branch>` | open `wiki/*` branches; one branch's page diff | `branches[n/total]{branch,doc,pages,created}` · the diff |
-| `brain wiki propose <doc-id\|lint>` | reads a run's page blocks on stdin, lints them, commits them to `wiki/<doc-id>` | `branch`, `pages`, or lint errors, exit 1 |
-| `brain wiki merge <branch>` · `drop <branch>` | lands or discards a proposed page edit | `merged`, `pages`, `conflict?` |
-| `brain lint [--vault <dir>]` | schemas, plus the wiki checks | errors and warnings, exit 1 on errors |
-| `brain reindex [--full]` | incremental or full rebuild | counts |
-| `brain eval` | recall@8 and tokens per answer | two numbers, plus a diff against the last run |
-| `brain tick [--dry-run]` | runs every due job once (see Jobs) | `ran[n]{job,ok,took}`; `--dry-run` prints what is due |
-| `brain migrate` | moves the system to a new host (B16) | a checklist |
+| person, project, decision | what it says | optional |
+| concept | a method or result across docs | required |
+| synthesis | an answer worth keeping | required |
 
-Output rules:
-- A list prints as a table with a `name[shown/total]` header and the id first. A single value prints as `key: value`. Long text is capped with `--full`.
-- `--json` prints compact JSONL.
-- Errors print as `error:` followed by `next:`. Exit 0 ok, 1 error, 2 usage.
-- `--help` is the only place flags are documented. Setup text never appears in help shown at run time.
+**Citations.** In concept and synthesis pages, every paragraph and list item outside
+`## Open questions` cites a doc as `[[dir]]` or `[[dir#heading]]`, and every cited id is in
+`sources[]`. A summary of a summary is caught, because each claim points back to a doc.
 
-## Implementation
+**The loop.**
+1. `brain wiki queue` lists marked docs no merged compile covers and no open branch holds.
+2. An agent run reads the doc and related pages and replies with one `=== page: <slug>`
+   block per page, writing no file.
+3. `brain wiki propose <doc>` lints the reply against the vault as it would be, and commits
+   the pages to `wiki/<doc>` through a temporary worktree. The vault's checkout is never
+   touched.
+4. You read it with `brain wiki diff` and land it with `brain wiki merge`, which merges only
+   `pages/`, re-lints, reindexes and writes a `source: compile` log block. On a conflict
+   nothing lands: a doc's branch is dropped and the doc re-queued, a learn or lint branch
+   is kept for you to rebase or drop. `brain wiki drop` discards a branch.
 
-- The CLI is built with clap derive, plus `clap_complete` for shell completions. The command tree above is the whole surface, and every flag is documented only in `--help`. The goal is a CLI a person enjoys using and an agent can drive from `--help` alone.
-- The Rust follows the `rust` skill (stable 1.99, edition 2024): types that make invalid states impossible, no panics in the library, let chains, `thiserror` errors. paperdb's lint set stays (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing` denied, `unsafe_code` forbidden).
-- The paperdb modules are reviewed against that skill before being renamed. The review and the rename are two separate diffs.
-- Dependencies stay as few as possible: rusqlite, serde, serde_json, thiserror, clap, plus a JSON Schema validator for `lint`.
+A learn run adds `=== question: <slug>` blocks: the question the corrected page answers,
+carried as a `Brain-Question:` commit trailer and appended to the eval set on merge. A later
+retrieval change that loses the corrected answer then fails `brain eval`.
 
-## Profile (C5)
+**Lint.** Errors: dead links or citations, uncited paragraphs, cited ids missing from
+`sources[]`, an ambiguous alias, a page over 1,500 tokens. Warnings: orphan pages, open
+contradictions older than 14 days, active pages untouched for 90 days, unknown frontmatter
+keys. There is no generated `index.md`; `brain pages` is the catalog.
 
-`brain profile` runs nightly and on demand, with no LLM. It assembles:
-- the 3 lines of focus from `pages/me.md`
-- active projects: pages with `status: active` that were touched in the last 14 days
-- today's committed plan items
-- items that need you: drover `needs` events and an overdue `later`
-- one line: "ask brain before guessing: `brain find`"
+## Eval
 
-It's capped at 400 tokens, counted with a tokenizer approximation, and the cap is tested.
+`eval/questions.jsonl` holds `{q, expect: [id…]}`. `brain eval` runs `find` on each and
+reports recall@8 and mean output tokens per hit, compared with the last run. Every real
+`find` is logged to `queries.jsonl`, the pool new questions come from. A retrieval change
+ships only if recall holds.
 
-## Wiki (C2, B17–B19)
+## Portability
 
-Karpathy's LLM Wiki pattern (gist 442a6bf5, 2026): instead of re-deriving answers from raw docs at every query, an agent compiles what you mark into pages that hold the current synthesis, so knowledge accumulates. Docs are the immutable sources; pages are the wiki; the compile and lint prompts are its schema. brain stays model-free: it stores, checks and merges pages, and the writing happens in drover runs.
-
-**Pages.** Frontmatter `{kind, title, summary, status, sources[], updated, superseded_by?}`. `summary` is one line of at most 120 chars, and is what `brain pages` prints. Kinds:
-
-| Kind | Holds | Citations |
-|---|---|---|
-| person · project · decision | as before | optional |
-| concept | a method, idea or result across papers: "diffusion policy", "JEPA", "action chunking" | required |
-| synthesis | an answer worth keeping: a comparison, a chat answer, a reading of several docs | required |
-
-**Citations.** A claim cites its source inline as a wikilink to the doc, `[[<doc-id>]]` or `[[<doc-id>#<heading>]]`, so Obsidian draws the edge from the claim's page to its evidence. In a concept or synthesis page, every paragraph and list item outside `## Open questions` carries at least one citation, and every cited id is in `sources[]`. This is the guard against drift: a summary of a summary is caught, because each claim must point back to a doc you can open.
-
-**Contradictions.** When a new doc disagrees with a page, compile keeps both claims and adds a `> [!contradiction]` callout citing both. You resolve it by editing the page; open callouts are counted in the Sunday review.
-
-**Compile.** A like or `brain add` puts the doc in `brain wiki queue` (marked docs minus those listed on the `docs:` line of a `source: compile` log block, and minus those with an open `wiki/<doc>` branch, so dropping or conflicting a branch re-queues its doc). The tick starts one ordinary `reader` run per queued doc, at most 5 a night, with `planner/compile.md`. Each run:
-1. reads the doc and `brain pages`, and `brain find`s related pages
-2. replies with the full new text of each page it creates or changes, one `=== page: <slug>` block per page; it writes no file
-
-The tick pipes that reply into `brain wiki propose <doc-id>`, which lints the pages and commits them to branch `wiki/<doc-id>` through a temporary worktree under `~/.cache/brain/`, leaving the vault's checkout untouched. On lint errors the tick retries the run once with the errors appended to the prompt, then gives up and logs it. So the agent never writes to the vault, brain stays its only writer, and drover needs no wiki-specific profile.
-
-Marking a doc is your approval to compile it. Merging is your approval to publish it. `brain wiki merge` does a git merge into the vault's `main`, reindexes the changed pages, and writes one C3 block `source: compile` listing the doc ids and pages. A conflict aborts the merge, drops the branch and re-queues the doc, so the next run starts from the merged state.
-
-**Filing answers.** From a chat thread, "file as page" starts a compile run with the thread as input and a `synthesis` page as the target. The same review applies.
-
-**Learning from corrections.** This follows Meta's "organizational second brain" (Meta Engineering, 2026-09-02), scaled down to one person. When you correct an agent ("no, that's wrong", or redirecting a run), the correction is a training signal that today is lost in a transcript. `planner/learn.md` is a weekly reader run over the week's normal chat threads (`chats/`) and drover run transcripts, in two separate steps:
-1. **Extract** each substantive correction, with the brain ids the agent had loaded (its `find` and `get` calls).
-2. **Attribute** it with one test: could the agent have reached the right answer from what it loaded?
-   - No, the knowledge was missing or wrong: a page edit, through `brain wiki propose learn`.
-   - Yes, the procedure was wrong: a suggested edit to a prompt, skill or AGENTS.md, listed in the review for you to apply.
-   - The sources disagree, or it's a judgment call: listed in the review as ambiguous, with no proposal.
-
-A reader can't call drover, so the tick gathers its input first: the week's `chats/` threads, plus each run's text and reply events (C9) exported from drover, written into the run's cwd.
-
-Classifying by the wording of the correction fails, because one remark can be any of the three; Meta found the same. Incognito threads are never read.
-
-**Regression.** Each merged `learn` proposal carries its question: the reply adds a `=== question: <slug>` block after the page that answers it, and `propose` stores it as a `Brain-Question: {"q", "expect"}` trailer on the branch's commit. The merge appends `{q, expect: [page-id], from: correction}` to `eval/questions.jsonl`. `brain eval` then fails any later retrieval change that loses the corrected answer. The check is a deterministic recall test, with no LLM judge.
-
-**Lint.** `brain lint` adds deterministic wiki checks to the schema checks:
-- errors: dead `[[wikilinks]]` or citations, uncited paragraphs in concept or synthesis pages, cited ids missing from `sources[]`, a missing `summary`, a page over 1500 tokens (split it: a page should load whole, which is the progressive-disclosure lesson)
-- warnings: orphan pages (no inbound link), open contradictions older than 14 days, `status: active` pages with no update in 90 days
-
-The semantic pass is `planner/wiki-lint.md`, a weekly `reader` run that looks for stale claims, missing concepts and missing cross-links; its reply goes through `brain wiki propose lint` onto a `wiki/lint-<date>` branch.
-
-**Why no `index.md`.** The gist keeps a generated catalog file for the agent to read first. Here that is `brain pages`: a derived file would duplicate the frontmatter in the vault (principle 2), and the CLI scales past the few hundred pages where a flat catalog stops fitting a context window.
-
-## Eval (B8)
-
-`eval/questions.jsonl` holds `{q, expect: [id…]}`. `brain eval` runs `find` on each question and reports recall@8 and the mean output tokens per hit. Every real `find` is appended to `~/.local/state/brain/queries.jsonl`, and the eval set grows two ways: by hand from that file, and automatically from every merged correction (see Wiki, Regression). The results are logged per commit, and a retrieval change ships only if recall doesn't drop.
-
-## feed (Python, `feed/`)
-
-A uv project with one entry point, `feed run`, started by the 15-minute tick when it's due (S3).
-
-**Pool (C6):** `~/.local/state/feed/pool.db`.
-
-```sql
-candidates(id PK, kind, title, url, abstract, sources JSON, first_seen, score, bucket, shown_at, expires_at)
-cursors(source PK, cursor, ok_at)
-```
-
-**Sources** (each one switchable in `feed.toml`). Each source has a cursor, and a failed run leaves its cursor unchanged, so the next run backfills the gap (F1):
-- arXiv listings for cs.RO, cs.LG, cs.CV and cs.AI, by `submittedDate` range
-- HF `daily_papers?date=`
-- S2 recommendations: 100 positives rotated per call, skips as negatives
-- alphaXiv For You and Hot, over MCP with an API key
-- lab RSS
-- F10 news: web search through a backend interface (SearXNG by default), HN Algolia, Reddit JSON, GitHub trending. Queries are generated nightly from `profile.md` and active project pages.
-
-**Dedupe:** by arXiv id without its version, then by canonical URL, then by normalized title (Jaccard ≥ 0.9). Anything already in the library or already in `labels.jsonl` is dropped.
-
-**Ranker.**
-- *Phase A* (14 days): the score is S2 rank plus `log(1 + hf_upvotes)`.
-- *Phase B*: logistic regression `g(x) = σ(wᵀφ(x) + b)` on frozen embeddings of title and abstract.
-  - Labels: positives are library papers and likes; explicit skips are negatives with weight 1; unlabeled pool items are background with weight 0.2.
-  - Calibration (Elkan & Noto 2008): `c = E[g(x) | y = 1]`, estimated on held-out positives, and `p(y = 1 | x) = g(x) / c`.
-  - Retrained nightly. Time-split AUC and like-rate go to the weekly review.
-- News uses the same model on title and snippet, with its own slot.
-
-**Selection:** from the unshown, unexpired pool, ranked by `score × decay(age)`:
-- the top 15 papers
-- 3 papers with `|p − 0.5|` smallest
-- 2 trending papers from outside your cluster
-- 5 news items
-
-Each item records its `bucket`. Items not shown carry over. Items expire after 21 days, and a `later` comes back after 7.
-
-**Summaries:** HF `ai_summary`, the Papers with Code `tldr` or the S2 tldr when present. Otherwise the free-tier LLM writes the 5-field card for the selected items only, and only for kinds paper, rss and news (F6). A failure is recorded as `summary: failed`.
-
-**Output:** the day's selection is written to `pool.db`, then one Web Push goes out with the count (F9).
-
-## planner (`planner/`)
-
-These are prompt files, not code (P7):
-- `plan.md` (07:30): reads `brain`, both calendars, `ocu tasks --jsonl`, `gh` issues and PRs, `drover ls`, and yesterday's log.
-- `shutdown` (18:30): deterministic, written in Rust, as `brain shutdown`. It reads commits and PRs across repos, task changes and drover runs, and writes them to `log/`.
-- `review.md` (Sunday), in two parts:
-  - **Plan:** estimated vs actual time, deep-work hours, rollovers.
-  - **Progress:** docs marked, concept pages created or changed (linked, so you can reread what you learned), contradictions opened and resolved, corrections learned and the procedure fixes waiting for you, recall@8 trend, like-rate, AUC.
-  - Counts come from `brain review stats`, which is deterministic; the prompt only writes them up.
-- `compile.md` (per queued doc), `wiki-lint.md` and `learn.md` (weekly): `reader` runs whose replies `brain wiki propose` turns into a branch (see Wiki).
-
-`brain review stats` counts the week from the log, `git log` of the vault, `labels.jsonl` and the eval history, and prints `key: value` lines.
-
-`brain plan checks` computes the challenge checks deterministically: free calendar time vs estimates, WIP above 3, items rolled over 3 or more times, no deep-work block. It prints them as `key: value` lines, which are pasted into the prompt.
-
-A plan run is `drover run --headless --profile reader --prompt-file planner/plan.md`. Its output is a plan block written by `brain log --source plan`, and committing it (`brain plan commit`) marks the items.
-
-## Migration from paperdb (B10)
-
-1. `brain migrate-paperdb ~/papers` turns each `papers/<id>/paper.json` into the frontmatter of `docs/<id>/<id>.md` with `kind: paper`.
-   - The card fields are kept under `meta.card` (still validated by the paper schema).
-   - `links[]` is classified into `links{code, project, …}` by host.
-   - `starred` becomes a tag.
-2. `paper.md` becomes the body of that note, and the PDFs are copied to `~/.cache/brain/pdf/` (arXiv can re-fetch them).
-3. The drover journal (`journal.db`, 13 entries) becomes `log/` blocks with their original dates.
-4. `readings/` (9 files) becomes `docs` with `kind: book`, and text extraction is reused from paperdb's ingest chain.
-5. `inbox.jsonl` is folded into the feed pool, and its skips into `labels.jsonl`.
-6. The old `~/papers` stays read-only for 30 days, then is deleted.
-
-Acceptance: 327 papers, 13 entries and 9 books carried over, and `brain lint` is clean.
-
-## Portability (B16)
-
-The whole system lives in `~/brain`, `~/.local/state`, `~/.config/brain` and the dotfiles. `brain migrate` prints and checks the procedure:
-1. restic restore
-2. `dot`
-3. `brain reindex --full`
-4. `systemctl --user enable --now brain-tick.timer`
-5. `brain eval`, compared with the last score
-
-## Storage
-
-| Path | Holds | Backup |
-|---|---|---|
-| `~/brain` | the vault | restic nightly, local git for history |
-| `~/.cache/brain/index.db` | the index | none, rebuildable |
-| `~/.local/state/feed/pool.db` | candidates, cursors | restic |
-| `~/.local/state/brain/queries.jsonl` | real queries for the eval | restic |
-| `~/.local/state/context.json` | C15 current timezone and place | none |
-| `~/.config/brain/` | `feed.toml`, credentials (mode 600) | dotfiles (age) |
+The system is `~/brain`, `~/.local/state`, `~/.config/brain` and your dotfiles. `brain
+migrate` checks the move: restore the backup, set up the machine, `brain reindex --full`,
+enable the timer, and compare `brain eval` with the last score. Other machines run brain on
+the host over ssh through `bin/brain-ssh`.
 
 ## Non-goals
 
-- No model calls inside the `brain` binary.
+- No model calls inside the binary.
 - No MCP server.
-- No claims table, open loops, reranker, contextual-retrieval prefixes or code embeddings until `brain eval` shows a failure that one of them fixes.
-- No storing of skipped candidates beyond their label.
 - No git remote for the vault.
-- No generated `index.md` or other derived file in the vault; `brain pages` is the catalog.
-- No page edit lands on `main` without a merge you made.
+- No derived files in the vault.
+- No page edit lands without a merge you made.
+- No reranker, claim table or code embeddings until the eval asks for one.
 
-## Decided
+## Open questions
 
-- brain is paperdb renamed, with the ingest chain kept (D2).
-- Rust for the store and CLI, Python for the feed (D3).
-- Brute-force vectors in BLOBs, no sqlite-vec.
-- Files win: any disagreement between a file and the index is resolved by reindexing.
-- The feed is a persistent pool with cursors per source, never a daily rebuild.
-- The vault is Obsidian-native: one note per doc, citations and relations as wikilinks, so the graph view shows the same edges agents query.
-- The wiki follows Karpathy's LLM Wiki, with two additions: every claim cites a doc, and every agent edit is a branch you merge.
+- Chunk size, 400 vs 800 tokens.
+- Embedder: a small model on CPU vs a larger one on an idle GPU.
+- Whether `find` should rank concept pages above the docs they cite.
 
-## Open (design level)
-
-- Chunk size, 400 vs 800 tokens. Settled by the eval.
-- Embedder default: Qwen3-Embedding-0.6B on CPU vs 4B on an idle GPU. Settled by the eval.
-- Whether `find` should rank concept pages above the docs they cite. Settled by the eval once 20 concept pages exist.
+Each is settled by the eval.
