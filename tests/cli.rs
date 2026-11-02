@@ -83,12 +83,24 @@ impl Env {
     }
 
     fn git(&self, args: &[&str]) -> String {
+        // The same identity brain's commits get: CI has no global git config.
         let out = Command::new("git")
             .arg("-C")
             .arg(self.vault())
             .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
             .output()
             .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8(out.stdout).unwrap()
     }
 

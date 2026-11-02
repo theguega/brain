@@ -2,10 +2,8 @@ name: ci
 on: [push, pull_request]
 jobs:
   check:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # brain runs only on the Linux host (systemd, /proc, ss, GNU date); other machines use bin/brain-ssh.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
