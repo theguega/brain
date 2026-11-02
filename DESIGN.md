@@ -190,6 +190,7 @@ tick one per tick, so a dead timer shows as stale.
 | Job | Kind | Runs when | Does |
 |---|---|---|---|
 | reindex | lazy | the vault's HEAD moved | incremental reindex, lineage retries |
+| enrich | lazy | a paper lacks its `hub:` or `axiv:` block | backfills 25 papers per tick |
 | embed | lazy | chunks lack vectors and the GPU is free | fills vectors, 10 minutes per tick |
 | repos | lazy | a repo's HEAD moved | indexes its markdown, commits and card |
 | eval | lazy | retrieval code or the eval set changed | recall@8 and tokens, logged per build |

@@ -67,6 +67,7 @@ pub const TABLE: &[Job] = &[
     job("wiki-lint", Kind::Cron("17:30"), Run::NeedsDrover),
     job("backup", Kind::Cron("02:00"), Run::Elsewhere),
     job("reindex", Kind::Lazy, Run::Here),
+    job("enrich", Kind::Lazy, Run::Here),
     job("repos", Kind::Lazy, Run::Here),
     job("embed", Kind::Lazy, Run::Here),
     job("compile", Kind::Lazy, Run::NeedsDrover),
@@ -213,6 +214,15 @@ impl Ctx<'_> {
                     due(format!("{n} chunks without vectors"), &n.to_string())
                 }
             }
+            ("enrich", _) => {
+                let n = lineage::papers_without(self.vault, "hub")?.len()
+                    + lineage::papers_without(self.vault, "axiv")?.len();
+                if n == 0 {
+                    None
+                } else {
+                    due(format!("{n} blocks missing"), &n.to_string())
+                }
+            }
             ("eval", _) => match eval::due(self.vault, &self.embedder)? {
                 Some(why) => due(
                     why.to_owned(),
@@ -257,24 +267,27 @@ impl Ctx<'_> {
                     if let Some(w) = tried.warning {
                         eprintln!("warning: {w}");
                     }
-                    // Same cadence for notes that predate the blocks add now writes.
-                    for (key, filled) in [
-                        ("hub", enrich::hub(self.vault, &self.db, enrich::PER_TICK)?),
-                        (
-                            "axiv",
-                            enrich::axiv(self.vault, &self.db, enrich::PER_TICK)?,
-                        ),
-                    ] {
-                        if let Some(w) = filled.warning {
-                            eprintln!("warning: {key}: {w}");
-                        }
-                    }
                 }
                 let c = index::reindex_text(self.vault, &self.db, &self.embedder)?;
                 for w in &c.warnings {
                     eprintln!("warning: {w}");
                 }
                 st.indexed_head = Some(self.head.clone());
+            }
+            // Its own job, not part of reindex: reindex is lazy on the vault HEAD, so a quiet
+            // vault would leave the backfill stuck after the first tick.
+            "enrich" => {
+                for (key, filled) in [
+                    ("hub", enrich::hub(self.vault, &self.db, enrich::PER_TICK)?),
+                    (
+                        "axiv",
+                        enrich::axiv(self.vault, &self.db, enrich::PER_TICK)?,
+                    ),
+                ] {
+                    if let Some(w) = filled.warning {
+                        eprintln!("warning: {key}: {w}");
+                    }
+                }
             }
             "embed" => {
                 if !self.embedder.cpu && gpu::busy(&self.embedder.url) {
@@ -487,7 +500,7 @@ mod tests {
 
     #[test]
     fn the_table_is_the_design_table() {
-        assert_eq!(TABLE.len(), 18);
+        assert_eq!(TABLE.len(), 19);
         assert_eq!(TABLE.iter().filter(|j| j.kind == Kind::Event).count(), 3);
     }
 
